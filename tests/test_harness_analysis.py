@@ -1,4 +1,5 @@
 from agenttrace.agents.analysis.nodes.harness_analyzer import harness_analyzer
+from agenttrace.agents.analysis.graph import build_graph
 
 
 def test_harness_analyzer_detects_high_relevance_from_static_structure():
@@ -75,3 +76,33 @@ def test_harness_analyzer_detects_medium_skill_or_tool_surface():
     assert result["harness_capabilities"]["tool_system"]["present"] is True
     assert result["harness_capabilities"]["skill_system"]["present"] is True
     assert result["harness_capabilities"]["agent_loop"]["present"] is False
+
+
+def test_analysis_graph_persists_harness_fields():
+    graph = build_graph()
+    result = graph.invoke(
+        {
+            "run_id": "run-1",
+            "repository_id": "repo-1",
+            "full_name": "acme/harness",
+            "github_url": "https://github.com/acme/harness",
+            "trigger": "MANUAL",
+            "repository_snapshot": {
+                "repository_id": "repo-1",
+                "full_name": "acme/harness",
+                "github_url": "https://github.com/acme/harness",
+                "metadata": {},
+                "readme": "Coding agent harness with tools and sandbox.",
+                "file_tree": [
+                    {"path": "src/agent_loop.py", "type": "file"},
+                    {"path": "src/tools/registry.py", "type": "file"},
+                    {"path": "src/workspace/sandbox.py", "type": "file"},
+                ],
+            },
+        }
+    )
+
+    persisted = result["persisted_analysis"]
+    assert persisted["harness_relevance"]["level"] in {"medium", "high"}
+    assert persisted["harness_capabilities"]["agent_loop"]["present"] is True
+    assert "followup_questions" in persisted
