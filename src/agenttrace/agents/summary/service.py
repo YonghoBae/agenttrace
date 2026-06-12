@@ -118,7 +118,10 @@ def summarize_repository(
                 "Repository summary output did not match the schema."
             ) from exc
 
-    return _constrain_followup_hints(result, summary_input)
+    return _constrain_followup_hints(
+        _apply_input_guards(result, summary_input, limitations),
+        summary_input,
+    )
 
 
 def requires_llm_summary(summary_input: RepositorySummaryInput) -> bool:
@@ -164,6 +167,21 @@ def _summary_basis(summary_input: RepositorySummaryInput) -> SummaryBasis:
     )
 
 
+def _apply_input_guards(
+    summary: RepositorySummary,
+    summary_input: RepositorySummaryInput,
+    limitations: list[str],
+) -> RepositorySummary:
+    summary.repository_id = summary_input.repository_id
+    summary.full_name = summary_input.full_name
+    summary.github_url = summary_input.github_url
+    summary.summary_basis = _summary_basis(summary_input)
+    summary.summary_limitations = _merge_unique(
+        [*limitations, *summary.summary_limitations]
+    )
+    return summary
+
+
 def _constrain_followup_hints(
     summary: RepositorySummary,
     summary_input: RepositorySummaryInput,
@@ -200,10 +218,25 @@ def _constrain_followup_hints(
 def _directories_from_file_tree(file_tree: list[str]) -> set[str]:
     directories = set()
     for path in file_tree:
+        if _looks_like_directory_path(path):
+            directories.add(path)
         parts = path.split("/")
         for index in range(1, len(parts)):
             directories.add("/".join(parts[:index]))
     return directories
+
+
+def _looks_like_directory_path(path: str) -> bool:
+    name = path.rstrip("/").rsplit("/", 1)[-1]
+    return bool(name) and "." not in name
+
+
+def _merge_unique(values: list[str]) -> list[str]:
+    merged = []
+    for value in values:
+        if value not in merged:
+            merged.append(value)
+    return merged
 
 
 def _summary_payload(summary_input: RepositorySummaryInput) -> dict[str, Any]:

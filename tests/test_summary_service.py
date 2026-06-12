@@ -189,6 +189,77 @@ def test_summarize_repository_removes_followup_paths_outside_input_file_tree():
     )
 
 
+def test_summarize_repository_preserves_input_identity_over_model_output():
+    class FakeModelWithWrongIdentity(FakeStructuredSummaryModel):
+        def invoke(self, payload):
+            result = super().invoke(payload)
+            result.repository_id = "wrong-repo"
+            result.full_name = "other/project"
+            result.github_url = "https://github.com/other/project"
+            return result
+
+    summary_input = RepositorySummaryInput(
+        repository_id="repo-1",
+        full_name="acme/weather-agent",
+        github_url="https://github.com/acme/weather-agent",
+        description="Weather automation assistant",
+        readme="# Weather Agent",
+    )
+
+    result = summarize_repository(summary_input, model=FakeModelWithWrongIdentity())
+
+    assert result.repository_id == "repo-1"
+    assert result.full_name == "acme/weather-agent"
+    assert result.github_url == "https://github.com/acme/weather-agent"
+
+
+def test_summarize_repository_always_includes_base_limitations():
+    class FakeModelWithoutBaseLimitations(FakeStructuredSummaryModel):
+        def invoke(self, payload):
+            result = super().invoke(payload)
+            result.summary_limitations = []
+            return result
+
+    summary_input = RepositorySummaryInput(
+        repository_id="repo-1",
+        full_name="acme/weather-agent",
+        github_url="https://github.com/acme/weather-agent",
+        description="Weather automation assistant",
+        readme="# Weather Agent",
+    )
+
+    result = summarize_repository(summary_input, model=FakeModelWithoutBaseLimitations())
+
+    assert "Based only on provided README and repository metadata." in (
+        result.summary_limitations
+    )
+    assert "File tree was not provided." in result.summary_limitations
+    assert "Implementation evidence was not validated in this summary step." in (
+        result.summary_limitations
+    )
+
+
+def test_summarize_repository_allows_directory_entries_from_file_tree():
+    class FakeModelWithDirectoryHint(FakeStructuredSummaryModel):
+        def invoke(self, payload):
+            result = super().invoke(payload)
+            result.followup_hints.directories = ["src/weather_agent"]
+            return result
+
+    summary_input = RepositorySummaryInput(
+        repository_id="repo-1",
+        full_name="acme/weather-agent",
+        github_url="https://github.com/acme/weather-agent",
+        description="Weather automation assistant",
+        readme="# Weather Agent",
+        file_tree=["README.md", "src/weather_agent"],
+    )
+
+    result = summarize_repository(summary_input, model=FakeModelWithDirectoryHint())
+
+    assert result.followup_hints.directories == ["src/weather_agent"]
+
+
 def test_summarize_repository_allows_limited_summary_status():
     class FakeLimitedModel(FakeStructuredSummaryModel):
         def invoke(self, payload):
