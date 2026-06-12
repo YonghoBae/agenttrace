@@ -62,17 +62,46 @@ EXPLICIT_HARNESS_README_PHRASES = [
 ]
 
 
+def _strong_harness_path_capabilities(paths: list[str]) -> set[str]:
+    strong: set[str] = set()
+    for path in paths:
+        lowered = path.lower()
+        parts = [part for part in lowered.replace("\\", "/").split("/") if part]
+        filename = parts[-1] if parts else ""
+        parent = parts[-2] if len(parts) > 1 else ""
+
+        if "agent_loop" in parts or filename.startswith("agent_loop."):
+            strong.add("agent_loop")
+        if "tool_registry" in parts or (parent == "tools" and filename.startswith("registry.")):
+            strong.add("tool_system")
+        if "sandbox" in parts or filename.startswith("sandbox."):
+            strong.add("sandbox_or_workspace")
+        if parent == "permissions" and filename.startswith("policy."):
+            strong.add("permission_control")
+        if parent == "memory" and filename.startswith("context."):
+            strong.add("memory_or_context_management")
+    return strong
+
+
 def _level_for(
     present_capabilities: set[str],
     readme_mentions_harness: bool,
     has_source_code_evidence: bool,
     has_explicit_harness_readme: bool,
+    has_config_or_test_evidence: bool,
+    strong_path_capabilities: set[str],
 ) -> tuple[str, str]:
     core_hits = present_capabilities & CORE_HIGH_RELEVANCE_CAPABILITIES
+    has_strong_harness_evidence = (
+        has_source_code_evidence
+        or has_config_or_test_evidence
+        or len(strong_path_capabilities) >= 2
+    )
     if (
         {"agent_loop", "tool_system"} <= present_capabilities
         and len(core_hits) >= 3
         and (has_source_code_evidence or has_explicit_harness_readme)
+        and has_strong_harness_evidence
     ):
         return "high", "high"
     if "tool_system" in present_capabilities or "skill_system" in present_capabilities:
@@ -99,6 +128,8 @@ def harness_analyzer(state: AnalysisState) -> AnalysisState:
     evidence: list[dict] = []
     present_capabilities: set[str] = set()
     has_source_code_evidence = False
+    has_config_or_test_evidence = False
+    strong_path_capabilities = _strong_harness_path_capabilities(paths)
 
     for name in HARNESS_CAPABILITY_NAMES:
         criteria = HARNESS_CAPABILITY_CRITERIA[name]
@@ -118,10 +149,13 @@ def harness_analyzer(state: AnalysisState) -> AnalysisState:
 
         capability_evidence = []
         for path in path_hits[:3]:
+            evidence_type = _evidence_type(path)
+            if evidence_type in {"config", "test"}:
+                has_config_or_test_evidence = True
             summary = f"Static path signal supports {name}: {path}"
             evidence.append(
                 {
-                    "type": _evidence_type(path),
+                    "type": evidence_type,
                     "location": path,
                     "summary": summary,
                     "supports": [name],
@@ -153,6 +187,8 @@ def harness_analyzer(state: AnalysisState) -> AnalysisState:
         readme_mentions_harness,
         has_source_code_evidence,
         has_explicit_harness_readme,
+        has_config_or_test_evidence,
+        strong_path_capabilities,
     )
     negative_evidence = []
     if readme_mentions_harness and not present_capabilities:
