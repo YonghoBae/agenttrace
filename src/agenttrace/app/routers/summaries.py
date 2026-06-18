@@ -7,11 +7,12 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from agenttrace.agents.summary import RepositorySummary, RepositorySummaryInput
+from agenttrace.agents.summary import RepositorySummary, RepositorySummaryRequest
 from agenttrace.agents.summary.service import requires_llm_summary, summarize_repository
 from agenttrace.app.dependencies import get_summary_model_factory
 from agenttrace.app.errors import summary_service_exception_to_http
-from agenttrace.services.repo_ingest import fetch_repo_digest, repo_digest_to_summary_input
+from agenttrace.config import get_settings
+from agenttrace.services.repo_ingest import fetch_repo_digest, repo_digest_to_summary_request
 
 router = APIRouter(tags=["summaries"])
 
@@ -22,28 +23,38 @@ class GithubUrlSummaryRequest(BaseModel):
 
 @router.post("/repository-summaries", response_model=RepositorySummary)
 def create_repository_summary(
-    summary_input: RepositorySummaryInput,
+    summary_request: RepositorySummaryRequest,
     summary_model_factory: Annotated[Callable[[], Any], Depends(get_summary_model_factory)],
 ) -> RepositorySummary:
     try:
-        model = summary_model_factory() if requires_llm_summary(summary_input) else None
-        return summarize_repository(summary_input, model=model)
+        model = summary_model_factory() if requires_llm_summary(summary_request) else None
+        return summarize_repository(summary_request, model=model)
     except Exception as exc:
         raise summary_service_exception_to_http(exc) from exc
 
 
-@router.post("/repository-summaries/from-github-url", response_model=RepositorySummary)
+@router.post(
+    "/repository-summaries/from-github-url",
+    response_model=RepositorySummary,
+    deprecated=True,
+)
 def create_repository_summary_from_github_url(
     request: GithubUrlSummaryRequest,
     summary_model_factory: Annotated[Callable[[], Any], Depends(get_summary_model_factory)],
 ) -> RepositorySummary:
+    if not get_settings().enable_github_url_summary:
+        raise HTTPException(status_code=404, detail="Not found")
+
     full_name = _parse_github_full_name(request.github_url)
 
     try:
         digest = fetch_repo_digest(full_name)
-        summary_input = repo_digest_to_summary_input(digest, fallback_full_name=full_name)
-        model = summary_model_factory() if requires_llm_summary(summary_input) else None
-        return summarize_repository(summary_input, model=model)
+        summary_request = repo_digest_to_summary_request(
+            digest,
+            fallback_full_name=full_name,
+        )
+        model = summary_model_factory() if requires_llm_summary(summary_request) else None
+        return summarize_repository(summary_request, model=model)
     except Exception as exc:
         raise summary_service_exception_to_http(exc) from exc
 

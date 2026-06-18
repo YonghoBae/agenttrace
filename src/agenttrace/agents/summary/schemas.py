@@ -8,16 +8,8 @@ from pydantic import BaseModel, Field
 
 class SummaryStatus(str, Enum):
     COMPLETED = "completed"
-    LIMITED = "limited"
     INSUFFICIENT_CONTEXT = "insufficient_context"
     FAILED = "failed"
-
-
-class ConfidenceLevel(str, Enum):
-    HIGH = "high"
-    MEDIUM = "medium"
-    LOW = "low"
-    UNKNOWN = "unknown"
 
 
 class AgentRelevanceLevel(str, Enum):
@@ -28,29 +20,14 @@ class AgentRelevanceLevel(str, Enum):
 
 
 class AgentRelevanceHint(BaseModel):
-    level: AgentRelevanceLevel
-    reason: str
-
-
-class HarnessRelevanceHint(BaseModel):
     level: AgentRelevanceLevel = AgentRelevanceLevel.UNKNOWN
-    reason: str = "[확인 필요] Harness relevance was not analyzed."
-    confidence: ConfidenceLevel = ConfidenceLevel.UNKNOWN
+    reason: str = ""
 
 
 class FollowupHints(BaseModel):
-    readme_sections: list[str] = Field(default_factory=list)
     files: list[str] = Field(default_factory=list)
     directories: list[str] = Field(default_factory=list)
     questions: list[str] = Field(default_factory=list)
-
-
-class SummaryBasis(BaseModel):
-    used_readme: bool = False
-    used_description: bool = False
-    used_topics: bool = False
-    used_primary_language: bool = False
-    used_file_tree: bool = False
 
 
 class RepositorySummaryInput(BaseModel):
@@ -64,30 +41,57 @@ class RepositorySummaryInput(BaseModel):
     file_tree: list[str] = Field(default_factory=list)
 
 
-class RepositorySummary(BaseModel):
-    repository_id: str
+class SummaryLimitations(BaseModel):
+    missing_inputs: list[str] = Field(default_factory=list)
+    truncated_inputs: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+class RepositoryMetadata(BaseModel):
+    repository_id: Optional[str] = None
     full_name: str
     github_url: str
-    one_line_summary: str
-    readme_summary: str
+    description: Optional[str] = None
+    topics: list[str] = Field(default_factory=list)
+    primary_language: Optional[str] = None
+    stars: Optional[int] = None
+    forks: Optional[int] = None
+    pushed_at: Optional[str] = None
+    github_updated_at: Optional[str] = None
+
+
+class SummaryGenerationOptions(BaseModel):
+    model_name: Optional[str] = None
+    prompt_version: Optional[str] = None
+
+
+class RepositorySummaryRequest(BaseModel):
+    repository: RepositoryMetadata
+    snapshot_id: Optional[str] = None
+    readme_text: Optional[str] = None
+    shallow_file_tree: list[str] = Field(default_factory=list)
+    options: SummaryGenerationOptions = Field(default_factory=SummaryGenerationOptions)
+
+
+class RepositorySummary(BaseModel):
+    repository_id: Optional[str] = None
+    snapshot_id: Optional[str] = None
+    full_name: str
+    github_url: str
+    summary_status: SummaryStatus
+    one_line_summary: Optional[str] = None
+    readme_summary: Optional[str] = None
     project_purpose: Optional[str] = None
-    apparent_target_users: list[str] = Field(default_factory=list)
-    readme_claims: list[str] = Field(default_factory=list)
-    readme_described_features: list[str] = Field(default_factory=list)
+    target_users: list[str] = Field(default_factory=list)
     possible_agent_relevance: AgentRelevanceHint = Field(
         default_factory=lambda: AgentRelevanceHint(
             level=AgentRelevanceLevel.UNKNOWN,
             reason="AgentHub relevance was not assessed.",
         )
     )
-    possible_harness_relevance: HarnessRelevanceHint = Field(
-        default_factory=HarnessRelevanceHint
-    )
     followup_hints: FollowupHints = Field(default_factory=FollowupHints)
-    summary_basis: SummaryBasis = Field(default_factory=SummaryBasis)
-    input_gaps: list[str] = Field(default_factory=list)
-    missing_details: list[str] = Field(default_factory=list)
-    summary_limitations: list[str] = Field(default_factory=list)
-    confidence: ConfidenceLevel = ConfidenceLevel.UNKNOWN
-    summary_status: SummaryStatus
-    summary_status_reason: str
+    summary_limitations: SummaryLimitations = Field(default_factory=SummaryLimitations)
+    generated_at: Optional[str] = None
+    model_name: Optional[str] = None
+    prompt_version: Optional[str] = None
+    error_message: Optional[str] = None
