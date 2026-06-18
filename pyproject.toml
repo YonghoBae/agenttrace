@@ -25,6 +25,7 @@ dev = [
 [project.scripts]
 agenthub-analyze = "agenttrace.agents.analysis.cli:main"
 agenttrace-api = "agenttrace.app.__main__:main"
+agenttrace-summary = "agenttrace.agents.summary.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
