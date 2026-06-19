@@ -3,10 +3,10 @@ from __future__ import annotations
 import json
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
-from agenttrace.agents.summary import RepositorySummaryInput
+from agenttrace.agents.summary import RepositoryMetadata, RepositorySummaryRequest
 from agenttrace.config import get_settings
 from agenttrace.shared.errors import RepoIngestError
 
@@ -43,16 +43,18 @@ def fetch_repo_digest(full_name: str) -> dict[str, Any]:
     return payload
 
 
-def repo_digest_to_summary_input(
+def repo_digest_to_summary_request(
     payload: dict[str, Any],
     fallback_full_name: str,
-) -> RepositorySummaryInput:
+) -> RepositorySummaryRequest:
     repo = _first_mapping(payload, "repository", "repo", "metadata") or payload
-    full_name = (
-        _string(repo.get("full_name"))
-        or _string(payload.get("repo_url"))
-        or _string(payload.get("short_repo_url"))
-        or fallback_full_name
+    full_name = _github_full_name(
+        _first_present(
+            repo.get("full_name"),
+            payload.get("repo_url"),
+            payload.get("short_repo_url"),
+            fallback_full_name,
+        )
     )
     github_url = (
         _string(repo.get("html_url"))
@@ -61,30 +63,47 @@ def repo_digest_to_summary_input(
         or f"https://github.com/{full_name}"
     )
 
-    return RepositorySummaryInput(
-        repository_id=_string(repo.get("id")) or full_name,
-        full_name=full_name,
-        github_url=github_url,
-        description=(
-            _string(repo.get("description"))
-            or _string(payload.get("description"))
-            or _string(payload.get("summary"))
+    return RepositorySummaryRequest(
+        repository=RepositoryMetadata(
+            repository_id=_string(repo.get("id")) or full_name,
+            full_name=full_name,
+            github_url=github_url,
+            description=(
+                _string(repo.get("description"))
+                or _string(payload.get("description"))
+                or _string(payload.get("summary"))
+            ),
+            topics=_string_list(repo.get("topics") or payload.get("topics")),
+            primary_language=(
+                _string(repo.get("primary_language"))
+                or _string(repo.get("language"))
+                or _string(payload.get("primary_language"))
+                or _string(payload.get("language"))
+            ),
+            stars=_int(_first_present(repo.get("stars"), repo.get("stargazers_count"))),
+            forks=_int(_first_present(repo.get("forks"), repo.get("forks_count"))),
+            pushed_at=_string(repo.get("pushed_at")),
+            github_updated_at=_string(
+                repo.get("github_updated_at") or repo.get("updated_at")
+            ),
         ),
-        topics=_string_list(repo.get("topics") or payload.get("topics")),
-        primary_language=(
-            _string(repo.get("primary_language"))
-            or _string(repo.get("language"))
-            or _string(payload.get("primary_language"))
-            or _string(payload.get("language"))
-        ),
-        readme=_truncate_readme(
+        readme_text=_truncate_readme(
             _string(payload.get("readme"))
             or _string(payload.get("readme_content"))
             or _string(payload.get("README"))
             or _string(payload.get("content"))
         ),
-        file_tree=_file_tree(payload.get("file_tree") or payload.get("files") or payload.get("tree")),
+        shallow_file_tree=_file_tree(
+            payload.get("file_tree") or payload.get("files") or payload.get("tree")
+        ),
     )
+
+
+def repo_digest_to_summary_input(
+    payload: dict[str, Any],
+    fallback_full_name: str,
+) -> RepositorySummaryRequest:
+    return repo_digest_to_summary_request(payload, fallback_full_name=fallback_full_name)
 
 
 def _first_mapping(payload: dict[str, Any], *keys: str) -> dict[str, Any] | None:
@@ -93,6 +112,27 @@ def _first_mapping(payload: dict[str, Any], *keys: str) -> dict[str, Any] | None
         if isinstance(value, dict):
             return value
     return None
+
+
+def _first_present(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def _github_full_name(value: Any) -> str:
+    text = _string(value)
+    if text is None:
+        return ""
+
+    parsed = urlparse(text)
+    if parsed.scheme and parsed.netloc.lower() == "github.com":
+        path_parts = [part for part in parsed.path.strip("/").split("/") if part]
+        if len(path_parts) >= 2:
+            return "/".join(path_parts[:2]).removesuffix(".git")
+
+    return text
 
 
 def _string(value: Any) -> str | None:
@@ -106,6 +146,15 @@ def _string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [text for item in value if (text := _string(item))]
+
+
+def _int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _file_tree(value: Any) -> list[str]:

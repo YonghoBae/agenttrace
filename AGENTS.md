@@ -7,6 +7,12 @@
 - Prefer `ctx_execute` for derived answers from files or command output.
 - Do not dump large raw files or command output into chat when a filtered answer is enough.
 
+## Reference Artifacts
+
+- Reference project artifacts from `artifacts/current` in the GitHub repository `finalyongoh/docs`.
+- Use GitHub MCP to inspect artifact documents from `finalyongoh/docs`; do not rely on local `docs/artifacts/` copies as the source of truth.
+- Treat artifact documents in `finalyongoh/docs:artifacts/current` as read-only reference material unless the user explicitly asks to update that repository.
+
 ## GitHub MCP
 
 - Use GitHub MCP for repository, issue, pull request, and review context.

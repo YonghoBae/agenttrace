@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from importlib import resources
 from typing import Any
 
@@ -9,14 +10,13 @@ from langchain_core.prompts import ChatPromptTemplate
 from agenttrace.agents.summary.schemas import (
     AgentRelevanceHint,
     AgentRelevanceLevel,
-    ConfidenceLevel,
     FollowupHints,
-    HarnessRelevanceHint,
     RepositorySummary,
-    RepositorySummaryInput,
-    SummaryBasis,
+    RepositorySummaryRequest,
+    SummaryLimitations,
     SummaryStatus,
 )
+from agenttrace.config import get_settings
 from agenttrace.shared.errors import (
     MissingSummaryModelError,
     SummaryGenerationError,
@@ -24,7 +24,12 @@ from agenttrace.shared.errors import (
 )
 
 
-SUMMARY_LIMITATION = "Based only on provided README and repository metadata."
+SUMMARY_PROMPT_ID = "repository-summary"
+SUMMARY_PROMPT_VERSION = "repository-summary@1.0.0"
+SUMMARY_BASELINE_NOTES = [
+    "README와 repository metadata 기준 요약입니다.",
+    "구현 근거 검증은 1차 Summary 단계에서 수행하지 않았습니다.",
+]
 
 
 def load_summary_prompt() -> str:
@@ -64,50 +69,56 @@ def build_summary_prompt_template() -> ChatPromptTemplate:
     )
 
 
+MAX_README_CHARS = 30000
+
+
 def summarize_repository(
-    summary_input: RepositorySummaryInput,
+    request: RepositorySummaryRequest,
     *,
     model: Any | None = None,
 ) -> RepositorySummary:
-    limitations = _base_limitations(summary_input)
+    model_name = request.options.model_name or get_settings().summary_model
+    prompt_version = request.options.prompt_version or SUMMARY_PROMPT_VERSION
 
-    if _has_insufficient_context(summary_input):
+    is_readme_truncated = False
+    if request.readme_text and len(request.readme_text) > MAX_README_CHARS:
+        request.readme_text = (
+            request.readme_text[:MAX_README_CHARS]
+            + "\n\n[Truncated by AgentTrace before summary generation.]"
+        )
+        is_readme_truncated = True
+
+    if _has_insufficient_context(request):
         return RepositorySummary(
-            repository_id=summary_input.repository_id,
-            full_name=summary_input.full_name,
-            github_url=summary_input.github_url,
-            one_line_summary=(
-                f"{summary_input.full_name} has insufficient summary context."
-            ),
-            readme_summary="",
+            repository_id=request.repository.repository_id,
+            snapshot_id=request.snapshot_id,
+            full_name=request.repository.full_name,
+            github_url=request.repository.github_url,
+            summary_status=SummaryStatus.INSUFFICIENT_CONTEXT,
+            one_line_summary=None,
+            readme_summary=None,
             project_purpose=None,
-            apparent_target_users=[],
-            readme_claims=[],
-            readme_described_features=[],
+            target_users=[],
             possible_agent_relevance=AgentRelevanceHint(
                 level=AgentRelevanceLevel.UNKNOWN,
-                reason="AgentHub relevance was not assessed because README and description were missing.",
-            ),
-            possible_harness_relevance=HarnessRelevanceHint(
-                level=AgentRelevanceLevel.UNKNOWN,
-                reason="[확인 필요] README and file tree were not available for a harness relevance hint.",
-                confidence=ConfidenceLevel.UNKNOWN,
+                reason="README and repository description were not available for an AgentHub relevance hint.",
             ),
             followup_hints=FollowupHints(),
-            summary_basis=_summary_basis(summary_input),
-            input_gaps=_input_gaps(summary_input),
-            missing_details=[],
-            summary_limitations=limitations,
-            confidence=ConfidenceLevel.UNKNOWN,
-            summary_status=SummaryStatus.INSUFFICIENT_CONTEXT,
-            summary_status_reason="README and description were not provided.",
+            summary_limitations=SummaryLimitations(
+                missing_inputs=_missing_inputs(request),
+                notes=list(SUMMARY_BASELINE_NOTES),
+            ),
+            generated_at=_utc_now_iso(),
+            model_name=model_name,
+            prompt_version=prompt_version,
+            error_message=None,
         )
 
     if model is None:
         raise MissingSummaryModelError("A summary LLM model is required.")
     structured_model = model.with_structured_output(RepositorySummary)
 
-    prompt_value = build_summary_prompt_template().invoke(_summary_payload(summary_input))
+    prompt_value = build_summary_prompt_template().invoke(_summary_payload(request))
 
     try:
         result = structured_model.invoke(prompt_value)
@@ -124,76 +135,99 @@ def summarize_repository(
                 "Repository summary output did not match the schema."
             ) from exc
 
+    guarded_result = _apply_input_guards(
+        result,
+        request,
+        model_name=model_name,
+        prompt_version=prompt_version,
+    )
+    if is_readme_truncated:
+        if "README" not in guarded_result.summary_limitations.truncated_inputs:
+            guarded_result.summary_limitations.truncated_inputs.append("README")
+
     return _constrain_followup_hints(
-        _apply_input_guards(result, summary_input, limitations),
-        summary_input,
+        guarded_result,
+        request,
     )
 
 
-def requires_llm_summary(summary_input: RepositorySummaryInput) -> bool:
-    return not _has_insufficient_context(summary_input)
-
-
-def _has_insufficient_context(summary_input: RepositorySummaryInput) -> bool:
-    return not (summary_input.readme or summary_input.description)
-
-
-def _base_limitations(summary_input: RepositorySummaryInput) -> list[str]:
-    limitations = [SUMMARY_LIMITATION]
-    if not summary_input.readme:
-        limitations.append("README content was not provided.")
-    if not summary_input.file_tree:
-        limitations.append("File tree was not provided.")
-    limitations.append("Implementation evidence was not validated in this summary step.")
-    return limitations
-
-
-def _input_gaps(summary_input: RepositorySummaryInput) -> list[str]:
-    gaps = []
-    if not summary_input.readme:
-        gaps.append("README content was not provided.")
-    if not summary_input.description:
-        gaps.append("Repository description was not provided.")
-    if not summary_input.topics:
-        gaps.append("Repository topics were not provided.")
-    if not summary_input.primary_language:
-        gaps.append("Primary language was not provided.")
-    if not summary_input.file_tree:
-        gaps.append("Shallow file tree was not provided.")
-    return gaps
-
-
-def _summary_basis(summary_input: RepositorySummaryInput) -> SummaryBasis:
-    return SummaryBasis(
-        used_readme=bool(summary_input.readme),
-        used_description=bool(summary_input.description),
-        used_topics=bool(summary_input.topics),
-        used_primary_language=bool(summary_input.primary_language),
-        used_file_tree=bool(summary_input.file_tree),
+def build_failed_summary(
+    request: RepositorySummaryRequest,
+    error_message: str,
+    model_name: str | None = None,
+    prompt_version: str | None = None,
+) -> RepositorySummary:
+    return RepositorySummary(
+        repository_id=request.repository.repository_id,
+        snapshot_id=request.snapshot_id,
+        full_name=request.repository.full_name,
+        github_url=request.repository.github_url,
+        summary_status=SummaryStatus.FAILED,
+        one_line_summary=None,
+        readme_summary=None,
+        project_purpose=None,
+        target_users=[],
+        possible_agent_relevance=AgentRelevanceHint(),
+        followup_hints=FollowupHints(),
+        summary_limitations=SummaryLimitations(notes=list(SUMMARY_BASELINE_NOTES)),
+        generated_at=_utc_now_iso(),
+        model_name=model_name,
+        prompt_version=prompt_version or SUMMARY_PROMPT_VERSION,
+        error_message=error_message,
     )
+
+
+def requires_llm_summary(request: RepositorySummaryRequest) -> bool:
+    return not _has_insufficient_context(request)
+
+
+def _has_insufficient_context(request: RepositorySummaryRequest) -> bool:
+    return not (_has_text(request.readme_text) or _has_text(request.repository.description))
+
+
+def _has_text(value: str | None) -> bool:
+    return bool(value and value.strip())
+
+
+def _missing_inputs(request: RepositorySummaryRequest) -> list[str]:
+    missing = []
+    if not _has_text(request.readme_text):
+        missing.append("README content was not provided.")
+    if not _has_text(request.repository.description):
+        missing.append("Repository description was not provided.")
+    return missing
 
 
 def _apply_input_guards(
     summary: RepositorySummary,
-    summary_input: RepositorySummaryInput,
-    limitations: list[str],
+    request: RepositorySummaryRequest,
+    *,
+    model_name: str | None,
+    prompt_version: str,
 ) -> RepositorySummary:
-    summary.repository_id = summary_input.repository_id
-    summary.full_name = summary_input.full_name
-    summary.github_url = summary_input.github_url
-    summary.summary_basis = _summary_basis(summary_input)
-    summary.summary_limitations = _merge_unique(
-        [*limitations, *summary.summary_limitations]
+    summary.repository_id = request.repository.repository_id
+    summary.snapshot_id = request.snapshot_id
+    summary.full_name = request.repository.full_name
+    summary.github_url = request.repository.github_url
+    summary.generated_at = _utc_now_iso()
+    summary.model_name = model_name
+    summary.prompt_version = prompt_version
+    if summary.summary_status == SummaryStatus.INSUFFICIENT_CONTEXT:
+        summary.one_line_summary = None
+        summary.readme_summary = None
+        summary.project_purpose = None
+    summary.summary_limitations.notes = _merge_unique(
+        [*summary.summary_limitations.notes, *SUMMARY_BASELINE_NOTES]
     )
     return summary
 
 
 def _constrain_followup_hints(
     summary: RepositorySummary,
-    summary_input: RepositorySummaryInput,
+    request: RepositorySummaryRequest,
 ) -> RepositorySummary:
-    allowed_files = set(summary_input.file_tree)
-    allowed_dirs = _directories_from_file_tree(summary_input.file_tree)
+    allowed_files = set(request.shallow_file_tree)
+    allowed_dirs = _directories_from_file_tree(request.shallow_file_tree)
 
     original_files = list(summary.followup_hints.files)
     original_dirs = list(summary.followup_hints.directories)
@@ -201,19 +235,21 @@ def _constrain_followup_hints(
         path for path in original_files if path in allowed_files
     ]
     summary.followup_hints.directories = [
-        path for path in original_dirs if path in allowed_dirs
+        path for path in original_dirs if _normalize_dir(path) in allowed_dirs
     ]
 
     removed_files = [path for path in original_files if path not in allowed_files]
-    removed_dirs = [path for path in original_dirs if path not in allowed_dirs]
+    removed_dirs = [
+        path for path in original_dirs if _normalize_dir(path) not in allowed_dirs
+    ]
 
     if removed_files:
-        summary.summary_limitations.append(
+        summary.summary_limitations.notes.append(
             "Removed follow-up files not present in file_tree: "
             + ", ".join(removed_files)
         )
     if removed_dirs:
-        summary.summary_limitations.append(
+        summary.summary_limitations.notes.append(
             "Removed follow-up directories not present in file_tree: "
             + ", ".join(removed_dirs)
         )
@@ -224,9 +260,10 @@ def _constrain_followup_hints(
 def _directories_from_file_tree(file_tree: list[str]) -> set[str]:
     directories = set()
     for path in file_tree:
+        normalized_path = _normalize_dir(path) if _looks_like_directory_path(path) else path
         if _looks_like_directory_path(path):
-            directories.add(path)
-        parts = path.split("/")
+            directories.add(normalized_path)
+        parts = normalized_path.split("/")
         for index in range(1, len(parts)):
             directories.add("/".join(parts[:index]))
     return directories
@@ -237,6 +274,10 @@ def _looks_like_directory_path(path: str) -> bool:
     return bool(name) and "." not in name
 
 
+def _normalize_dir(path: str) -> str:
+    return path.rstrip("/")
+
+
 def _merge_unique(values: list[str]) -> list[str]:
     merged = []
     for value in values:
@@ -245,14 +286,22 @@ def _merge_unique(values: list[str]) -> list[str]:
     return merged
 
 
-def _summary_payload(summary_input: RepositorySummaryInput) -> dict[str, Any]:
+def _summary_payload(request: RepositorySummaryRequest) -> dict[str, Any]:
     return {
-        "repository_id": summary_input.repository_id,
-        "full_name": summary_input.full_name,
-        "github_url": summary_input.github_url,
-        "description": summary_input.description or "",
-        "topics": json.dumps(summary_input.topics, ensure_ascii=False),
-        "primary_language": summary_input.primary_language or "",
-        "readme": summary_input.readme or "",
-        "file_tree": json.dumps(summary_input.file_tree, ensure_ascii=False, indent=2),
+        "repository_id": request.repository.repository_id or "",
+        "full_name": request.repository.full_name,
+        "github_url": request.repository.github_url,
+        "description": request.repository.description or "",
+        "topics": json.dumps(request.repository.topics, ensure_ascii=False),
+        "primary_language": request.repository.primary_language or "",
+        "readme": request.readme_text or "",
+        "file_tree": json.dumps(
+            request.shallow_file_tree,
+            ensure_ascii=False,
+            indent=2,
+        ),
     }
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")

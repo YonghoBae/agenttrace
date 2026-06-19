@@ -3,32 +3,39 @@
 from agenttrace.agents.summary.schemas import (
     AgentRelevanceHint,
     AgentRelevanceLevel,
-    ConfidenceLevel,
     FollowupHints,
-    HarnessRelevanceHint,
+    RepositoryMetadata,
     RepositorySummary,
     RepositorySummaryInput,
-    SummaryBasis,
+    RepositorySummaryRequest,
+    SummaryGenerationOptions,
+    SummaryLimitations,
     SummaryStatus,
 )
-from agenttrace.agents.summary.service import (
+from agenttrace.shared.errors import (
     MissingSummaryModelError,
     SummaryGenerationError,
     SummaryServiceError,
-    summarize_repository,
 )
 from agenttrace.models import build_openai_summary_model
+
+
+def summarize_repository(*args, **kwargs):
+    from agenttrace.agents.summary.service import summarize_repository as _summarize
+
+    return _summarize(*args, **kwargs)
 
 __all__ = [
     "AgentRelevanceHint",
     "AgentRelevanceLevel",
-    "ConfidenceLevel",
     "FollowupHints",
-    "HarnessRelevanceHint",
     "MissingSummaryModelError",
+    "RepositoryMetadata",
     "RepositorySummary",
     "RepositorySummaryInput",
-    "SummaryBasis",
+    "RepositorySummaryRequest",
+    "SummaryGenerationOptions",
+    "SummaryLimitations",
     "SummaryGenerationError",
     "SummaryServiceError",
     "SummaryStatus",

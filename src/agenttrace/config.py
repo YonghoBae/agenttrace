@@ -11,6 +11,7 @@ class Settings:
     summary_model: str = "gpt-4o-mini"
     repo_ingest_base_url: str = "http://100.91.255.31:8010"
     repo_ingest_host_header: str | None = "localhost:8010"
+    enable_github_url_summary: bool = False
     openai_api_key: str | None = None
     openai_api_base: str | None = None
     langsmith_tracing: str | None = None
@@ -34,6 +35,11 @@ def get_settings() -> Settings:
             "AGENTTRACE_REPO_INGEST_HOST_HEADER",
             env_values,
             "localhost:8010",
+        ),
+        enable_github_url_summary=_get_bool_env(
+            "AGENTTRACE_ENABLE_GITHUB_URL_SUMMARY",
+            env_values,
+            False,
         ),
         openai_api_key=_get_env("OPENAI_API_KEY", env_values),
         openai_api_base=(
@@ -67,6 +73,17 @@ def _get_env(
     default: str | None = None,
 ) -> str | None:
     return os.getenv(key) or env_values.get(key) or default
+
+
+def _get_bool_env(
+    key: str,
+    env_values: dict[str, str],
+    default: bool = False,
+) -> bool:
+    value = os.getenv(key) or env_values.get(key)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _load_dotenv(path: Path) -> dict[str, str]:

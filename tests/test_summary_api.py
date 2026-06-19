@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from agenttrace.agents.summary import RepositorySummary, RepositorySummaryInput
+from agenttrace.agents.summary import RepositorySummary, RepositorySummaryRequest
 from agenttrace.agents.summary.service import (
     MissingSummaryModelError,
     SummaryGenerationError,
@@ -17,15 +17,12 @@ class FakeStructuredSummaryModel:
 
     def invoke(self, _payload):
         return self.schema(
-            repository_id="repo-1",
-            full_name="acme/weather-agent",
-            github_url="https://github.com/acme/weather-agent",
+            full_name="ignored/llm-output",
+            github_url="https://github.com/ignored/llm-output",
             one_line_summary="Weather Agent appears to provide weather automation tools.",
             readme_summary="Weather Agent is presented as an MCP-style weather automation project.",
             project_purpose="Provide weather automation helpers for agent workflows.",
-            apparent_target_users=["agent developers", "MCP users"],
-            readme_claims=["README says the project provides forecast lookup."],
-            readme_described_features=["forecast lookup", "weather alerts"],
+            target_users=["agent developers", "MCP users"],
             possible_agent_relevance={
                 "level": "medium",
                 "reason": "README mentions agent workflows, but implementation evidence was not validated.",
@@ -36,21 +33,10 @@ class FakeStructuredSummaryModel:
                 "directories": ["src/weather_agent"],
                 "questions": ["Does the example run with a real API key?"],
             },
-            summary_basis={
-                "used_readme": True,
-                "used_description": True,
-                "used_topics": True,
-                "used_primary_language": True,
-                "used_file_tree": True,
+            summary_limitations={
+                "notes": ["Implementation evidence was not validated in this summary step."]
             },
-            input_gaps=[],
-            missing_details=["Runtime behavior was not checked."],
-            summary_limitations=[
-                "Implementation evidence was not validated in this summary step."
-            ],
-            confidence="medium",
             summary_status="completed",
-            summary_status_reason="README and metadata provide enough detail for a useful summary.",
         )
 
 
@@ -73,26 +59,40 @@ def test_repository_summary_endpoint_returns_summary(monkeypatch):
     response = client.post(
         "/v1/repository-summaries",
         json={
-            "repository_id": "repo-1",
-            "full_name": "acme/weather-agent",
-            "github_url": "https://github.com/acme/weather-agent",
-            "description": "Weather automation helpers",
-            "topics": ["agent"],
-            "primary_language": "Python",
-            "readme": "# Weather Agent",
-            "file_tree": ["README.md", "examples/client.py"],
+            "repository": {
+                "repository_id": "repo-1",
+                "full_name": "acme/weather-agent",
+                "github_url": "https://github.com/acme/weather-agent",
+                "description": "Weather automation tools.",
+                "topics": ["mcp", "weather"],
+                "primary_language": "Python",
+            },
+            "snapshot_id": "snapshot-1",
+            "readme_text": "# Weather Agent\nMCP weather tools.",
+            "shallow_file_tree": ["README.md", "src/weather_agent/"],
+            "options": {"model_name": "gpt-test-model"},
         },
     )
 
     assert response.status_code == 200
     body = response.json()
+    assert body["repository_id"] == "repo-1"
+    assert body["snapshot_id"] == "snapshot-1"
+    assert body["full_name"] == "acme/weather-agent"
+    assert body["github_url"] == "https://github.com/acme/weather-agent"
     assert body["summary_status"] == "completed"
     assert body["possible_agent_relevance"]["level"] == "medium"
-    assert body["followup_hints"]["files"] == ["examples/client.py"]
-    assert body["apparent_target_users"] == ["agent developers", "MCP users"]
+    assert body["followup_hints"]["files"] == []
+    assert body["followup_hints"]["directories"] == ["src/weather_agent"]
+    assert body["target_users"] == ["agent developers", "MCP users"]
+    assert body["model_name"] == "gpt-test-model"
+    assert body["prompt_version"] == "repository-summary@1.0.0"
+    assert "generated_at" in body
+    assert "apparent_target_users" not in body
 
 
 def test_repository_summary_from_github_url_ingests_repo_before_summarizing(monkeypatch):
+    monkeypatch.setenv("AGENTTRACE_ENABLE_GITHUB_URL_SUMMARY", "true")
     monkeypatch.setattr(
         "agenttrace.app.dependencies.build_openai_summary_model",
         lambda: FakeStructuredSummaryModel(),
@@ -119,13 +119,12 @@ def test_repository_summary_from_github_url_ingests_repo_before_summarizing(monk
         captured["summary_input"] = summary_input
         captured["model"] = kwargs["model"]
         return RepositorySummary(
-            repository_id=summary_input.repository_id,
-            full_name=summary_input.full_name,
-            github_url=summary_input.github_url,
+            repository_id=summary_input.repository.repository_id,
+            full_name=summary_input.repository.full_name,
+            github_url=summary_input.repository.github_url,
             one_line_summary="Weather Agent appears to provide weather automation tools.",
             readme_summary="Weather Agent is presented as an MCP-style weather automation project.",
             summary_status="completed",
-            summary_status_reason="README and metadata provide enough detail for a useful summary.",
         )
 
     monkeypatch.setattr(
@@ -146,19 +145,34 @@ def test_repository_summary_from_github_url_ingests_repo_before_summarizing(monk
     assert response.status_code == 200
     assert captured["full_name"] == "acme/weather-agent"
     assert captured["model"] is not None
-    assert captured["summary_input"] == RepositorySummaryInput(
-        repository_id="repo-1",
-        full_name="acme/weather-agent",
-        github_url="https://github.com/acme/weather-agent",
-        description="Weather automation helpers",
-        topics=["agent"],
-        primary_language="Python",
-        readme="# Weather Agent",
-        file_tree=["README.md", "examples/client.py"],
+    assert captured["summary_input"] == RepositorySummaryRequest(
+        repository={
+            "repository_id": "repo-1",
+            "full_name": "acme/weather-agent",
+            "github_url": "https://github.com/acme/weather-agent",
+            "description": "Weather automation helpers",
+            "topics": ["agent"],
+            "primary_language": "Python",
+        },
+        readme_text="# Weather Agent",
+        shallow_file_tree=["README.md", "examples/client.py"],
     )
 
 
-def test_repository_summary_from_github_url_rejects_non_github_url():
+def test_repository_summary_from_github_url_is_disabled_by_default(monkeypatch):
+    monkeypatch.setenv("AGENTTRACE_ENABLE_GITHUB_URL_SUMMARY", "false")
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/v1/repository-summaries/from-github-url",
+        json={"github_url": "https://github.com/acme/weather-agent"},
+    )
+
+    assert response.status_code == 404
+
+
+def test_repository_summary_from_github_url_rejects_non_github_url(monkeypatch):
+    monkeypatch.setenv("AGENTTRACE_ENABLE_GITHUB_URL_SUMMARY", "true")
     client = TestClient(create_app())
 
     response = client.post(
@@ -183,10 +197,12 @@ def test_repository_summary_endpoint_maps_missing_model_to_500(monkeypatch):
     response = client.post(
         "/v1/repository-summaries",
         json={
-            "repository_id": "repo-1",
-            "full_name": "acme/weather-agent",
-            "github_url": "https://github.com/acme/weather-agent",
-            "description": "Weather automation helpers",
+            "repository": {
+                "repository_id": "repo-1",
+                "full_name": "acme/weather-agent",
+                "github_url": "https://github.com/acme/weather-agent",
+                "description": "Weather automation helpers",
+            },
         },
     )
 
@@ -209,10 +225,12 @@ def test_repository_summary_endpoint_maps_llm_failure_to_502(monkeypatch):
     response = client.post(
         "/v1/repository-summaries",
         json={
-            "repository_id": "repo-1",
-            "full_name": "acme/weather-agent",
-            "github_url": "https://github.com/acme/weather-agent",
-            "description": "Weather automation helpers",
+            "repository": {
+                "repository_id": "repo-1",
+                "full_name": "acme/weather-agent",
+                "github_url": "https://github.com/acme/weather-agent",
+                "description": "Weather automation helpers",
+            },
         },
     )
 
