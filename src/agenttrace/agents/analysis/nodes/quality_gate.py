@@ -1,88 +1,70 @@
 from __future__ import annotations
 
-from agenttrace.agents.analysis.criteria.agent_type_keywords import BANNED_ASSERTIVE_WORDS
+from pydantic import ValidationError
+
+from agenttrace.agents.analysis.schemas.result import AnalysisResult
 from agenttrace.agents.analysis.state import AnalysisState
 
 
 def quality_gate(state: AnalysisState) -> AnalysisState:
-    errors: list[str] = []
+    critical_errors: list[str] = []
     warnings: list[str] = []
+    final_result = state.get("final_result")
 
-    status = state.get("status", "COLLECTED")
-
-    for claim in state.get("claims", []):
-        if not claim.get("source"):
-            errors.append(f"{claim.get('id', 'unknown claim')}에 source가 없습니다.")
-        if not claim.get("claim_text"):
-            errors.append(f"{claim.get('id', 'unknown claim')}에 claim_text가 없습니다.")
-
-    evidence_signals = state.get("evidence_signals", [])
-    linked_claim_ids: set[str] = set()
-    for evidence in evidence_signals:
-        if not evidence.get("path"):
-            errors.append("EvidenceSignal에 path가 없습니다.")
-        if evidence.get("claim_id"):
-            linked_claim_ids.add(evidence["claim_id"])
-
-    if status != "OUT_OF_SCOPE" and not state.get("followup_actions"):
-        errors.append("OUT_OF_SCOPE이 아닌 분석에는 followup_actions가 필요합니다.")
-
-    has_uncertainty_risk = any(
-        risk.get("risk_type") == "ANALYSIS_UNCERTAIN"
-        for risk in state.get("risk_signals", [])
-    )
-    final_status = "UNCERTAIN" if has_uncertainty_risk else status
-    would_complete = final_status not in {"OUT_OF_SCOPE", "INSUFFICIENT_EVIDENCE", "UNCERTAIN"}
-
-    missing_claim_evidence = [
-        claim_id
-        for claim_id in (claim.get("id") for claim in state.get("claims", []))
-        if claim_id and claim_id not in linked_claim_ids
-    ]
-
-    if would_complete:
-        if not evidence_signals:
-            errors.append("COMPLETED 상태에는 하나 이상의 EvidenceSignal이 필요합니다.")
-
-        for claim_id in missing_claim_evidence:
-            errors.append(f"{claim_id}에 연결된 EvidenceSignal이 없습니다.")
-    elif final_status == "UNCERTAIN":
-        for claim_id in missing_claim_evidence:
-            warnings.append(f"{claim_id}에 연결된 EvidenceSignal이 없습니다.")
-
-    harness_relevance = state.get("harness_relevance", {})
-    if (
-        harness_relevance.get("level") == "high"
-        and not harness_relevance.get("evidence")
-    ):
-        errors.append("harness_relevance cannot be high without harness evidence.")
-
-    text_fields = [
-        state.get("classification_reason", ""),
-        "\n".join(action.get("reason", "") for action in state.get("followup_actions", [])),
-        "\n".join(risk.get("summary", "") for risk in state.get("risk_signals", [])),
-    ]
-    for banned_word in BANNED_ASSERTIVE_WORDS:
-        if any(banned_word in text for text in text_fields):
-            errors.append(f"과장 또는 단정 표현이 포함되어 있습니다: {banned_word}")
-
-    if state.get("agent_type") in {"UNKNOWN", None}:
-        warnings.append("agent_type 분류가 불확실합니다.")
-
-    if errors:
+    try:
+        result = AnalysisResult.model_validate(final_result)
+    except ValidationError as exc:
         return {
-            "status": "NEEDS_HUMAN_REVIEW",
-            "quality_errors": errors,
-            "quality_warnings": warnings,
+            "quality_gate_result": {
+                "warnings": [],
+                "critical_errors": [f"AnalysisResult schema invalid: {exc.errors()[0]['msg']}"],
+            },
+            "quality_errors": ["AnalysisResult schema invalid"],
         }
 
-    if final_status in {"OUT_OF_SCOPE", "INSUFFICIENT_EVIDENCE", "UNCERTAIN"}:
-        return {
-            "status": final_status,
-            "quality_warnings": warnings,
-        }
+    claim_ids = {claim.claim_id for claim in result.analysis_claims}
+    evidence_ids = {signal.signal_id for signal in result.evidence_signals}
+    task_ids = {task.get("task_id") for task in state.get("analysis_plan", {}).get("tasks", [])}
+
+    for task_result in result.evidence_task_results:
+        if task_ids and task_result.task_id not in task_ids:
+            critical_errors.append(f"Unknown task_id referenced: {task_result.task_id}")
+        for signal_id in task_result.evidence_signal_ids:
+            if signal_id not in evidence_ids:
+                critical_errors.append(f"Unknown evidence_signal_id referenced: {signal_id}")
+        for verdict in task_result.claim_verdicts:
+            if verdict.claim_id not in claim_ids:
+                critical_errors.append(f"Unknown claim_id referenced: {verdict.claim_id}")
+            for signal_id in verdict.evidence_signal_ids:
+                if signal_id not in evidence_ids:
+                    critical_errors.append(f"Unknown evidence_signal_id referenced: {signal_id}")
+
+    required_ids = {
+        task.get("task_id")
+        for task in state.get("analysis_plan", {}).get("tasks", [])
+        if task.get("required")
+    }
+    result_by_task = {task.task_id: task for task in result.evidence_task_results}
+    missing_required = required_ids - set(result_by_task)
+    if missing_required:
+        critical_errors.append(f"Missing required task results: {', '.join(sorted(missing_required))}")
+
+    insufficient_required = [
+        task_id for task_id in required_ids
+        if result_by_task.get(task_id) and result_by_task[task_id].status == "INSUFFICIENT_EVIDENCE"
+    ]
+    if insufficient_required and result.analysis_status == "completed":
+        critical_errors.append("completed status conflicts with insufficient required task")
+
+    if result.analysis_status in {"completed_with_limitations", "insufficient_evidence", "uncertain_classification"}:
+        warnings.extend(result.analysis_limitations.notes)
 
     return {
-        "status": "COMPLETED",
+        "quality_gate_result": {
+            "warnings": warnings,
+            "critical_errors": critical_errors,
+        },
         "quality_warnings": warnings,
+        "quality_errors": critical_errors,
+        "status": "NEEDS_HUMAN_REVIEW" if critical_errors else state.get("status", "COLLECTED"),
     }

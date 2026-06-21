@@ -5,6 +5,9 @@ from agenttrace.agents.analysis.nodes.content_preprocessor import content_prepro
 from agenttrace.agents.analysis.nodes.evidence_evaluator import evidence_evaluator
 from agenttrace.agents.analysis.nodes.evidence_scout import evidence_scout
 from agenttrace.agents.analysis.nodes.finalize_task import finalize_task
+from agenttrace.agents.analysis.nodes.finalize_analysis import finalize_analysis
+from agenttrace.agents.analysis.nodes.quality_gate import quality_gate
+from agenttrace.agents.analysis.nodes.repository_synthesizer import repository_synthesizer
 from agenttrace.agents.analysis.nodes.request_builder import request_builder
 from agenttrace.agents.analysis.nodes.task_result_merge import task_result_merge
 
@@ -117,3 +120,43 @@ def test_evidence_task_loop_resolves_supported_claim():
     task_result = result["task_results"][0]
     assert task_result["status"] == "RESOLVED"
     assert task_result["claim_verdicts"][0]["verdict"] in {"SUPPORTED", "PARTIALLY_SUPPORTED"}
+
+
+def test_repository_synthesizer_marks_required_task_insufficient():
+    state = {
+        "analysis_plan": {"tasks": [{"task_id": "task-1", "required": True}]},
+        "task_results": [
+            {
+                "task_id": "task-1",
+                "status": "INSUFFICIENT_EVIDENCE",
+                "claim_verdicts": [],
+                "evidence_signal_ids": [],
+                "limitations": ["no source"],
+            }
+        ],
+        "analysis_limitations": {"missing_inputs": ["source_files"], "truncated_inputs": [], "notes": []},
+    }
+
+    result = repository_synthesizer(state)
+
+    assert result["synthesis"]["analysis_status"] == "insufficient_evidence"
+
+
+def test_finalize_analysis_builds_schema_valid_result():
+    state = {
+        "synthesis": {
+            "analysis_status": "insufficient_evidence",
+            "agent_type": "Unknown",
+            "tech_stack_summary": {"ko": "미확인", "en": "Unknown"},
+        },
+        "claims": [],
+        "evidence_signals": [],
+        "task_results": [],
+        "risk_signals": [],
+        "follow_up_guide": {"ko": "README를 확인하세요.", "en": "Check README."},
+        "analysis_limitations": {"missing_inputs": ["source_files"], "truncated_inputs": [], "notes": ["limited"]},
+    }
+    result = finalize_analysis(state)
+
+    assert result["final_result"]["analysis_status"] == "insufficient_evidence"
+    assert quality_gate({**state, **result})["quality_gate_result"]["critical_errors"] == []
