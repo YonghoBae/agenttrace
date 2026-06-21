@@ -56,6 +56,14 @@ def test_source_file_normalizes_supplied_hash_to_lowercase():
     assert validated.content_hash == src.content_hash
 
 
+def test_source_file_accepts_empty_content_with_valid_hash():
+    # If content is empty, but a valid hash is provided, it should be accepted (State Diet)
+    h = "sha256:" + "a" * 64
+    sf = SourceFile(path="src/server.py", content="", content_hash=h)
+    assert sf.content == ""
+    assert sf.content_hash == h
+
+
 def test_content_chunk_rejects_invalid_offsets_and_line_ranges():
     valid_chunk = {
         "chunk_id": "chunk-1",

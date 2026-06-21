@@ -38,6 +38,7 @@ Trigger = Literal[
 class AnalysisState(TypedDict, total=False):
     # Run identity
     run_id: str
+    local_repo_dir: str
     repository_id: str
     full_name: str
     github_url: str
@@ -87,6 +88,7 @@ class AnalysisState(TypedDict, total=False):
     risk_signals: Annotated[list[dict], operator.add]
     followup_actions: list[dict]
     followup_guide: list[dict]
+    follow_up_guide: dict
     harness_relevance: dict
     harness_capabilities: dict
     negative_evidence: Annotated[list[dict], operator.add]

@@ -46,4 +46,13 @@ def finalize_analysis(state: AnalysisState) -> AnalysisState:
             "notes": [],
         },
     })
+
+    import shutil
+    from pathlib import Path
+    local_repo_dir_str = state.get("local_repo_dir")
+    if local_repo_dir_str:
+        local_repo_dir = Path(local_repo_dir_str)
+        if local_repo_dir.exists():
+            shutil.rmtree(local_repo_dir, ignore_errors=True)
+
     return {"final_result": result.model_dump()}

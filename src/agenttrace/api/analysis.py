@@ -159,6 +159,9 @@ def _compat_result_json(analysis_result: dict[str, Any], input_req: AnalysisInpu
 
 
 async def run_pipeline_async(req: AnalysisRequest) -> None:
+    from pathlib import Path
+    run_id = str(req.analysis_id)
+    local_repo_dir = Path("tmp/agenttrace") / run_id
     try:
         logger.info("Starting async analysis pipeline for run_id=%s", req.analysis_id)
         input_req = await req.to_input_request()
@@ -166,6 +169,7 @@ async def run_pipeline_async(req: AnalysisRequest) -> None:
         result = await asyncio.to_thread(
             graph.invoke,
             {
+                "run_id": run_id,
                 "analysis_request": input_req.model_dump(mode="json"),
                 "claims": [],
                 "evidence_signals": [],
@@ -193,6 +197,9 @@ async def run_pipeline_async(req: AnalysisRequest) -> None:
             logger.error("Failed to send failure callback: %s", callback_exc)
         raise
     finally:
+        import shutil
+        if local_repo_dir.exists():
+            shutil.rmtree(local_repo_dir, ignore_errors=True)
         active_analyses.discard(str(req.analysis_id))
 
 

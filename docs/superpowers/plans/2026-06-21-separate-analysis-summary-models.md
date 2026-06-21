@@ -123,12 +123,12 @@
       settings = get_settings()
 
       if not settings.openai_api_key:
-          raise MissingSummaryModelError("OPENAI_API_KEY is required for analysis generation.")
+          raise MissingAnalysisModelError("OPENAI_API_KEY is required for analysis generation.")
 
       try:
           from langchain_openai import ChatOpenAI
       except ImportError as exc:
-          raise MissingSummaryModelError(
+          raise MissingAnalysisModelError(
               "langchain-openai is required for OpenAI analysis generation."
           ) from exc
 

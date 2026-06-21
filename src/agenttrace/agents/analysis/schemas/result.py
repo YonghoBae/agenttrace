@@ -40,7 +40,7 @@ class EvidenceSignal(BaseModel):
 
 class ClaimVerdict(BaseModel):
     claim_id: str
-    verdict: Literal["SUPPORTED", "PARTIALLY_SUPPORTED", "CONTRADICTED", "NOT_FOUND", "INSUFFICIENT_EVIDENCE"]
+    verdict: Literal["SUPPORTED", "PARTIALLY_SUPPORTED", "CONTRADICTED", "NOT_FOUND", "INSUFFICIENT_EVIDENCE", "DOCUMENTED"]
     reason: str
     evidence_signal_ids: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
