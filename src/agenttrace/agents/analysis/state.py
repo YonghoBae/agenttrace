@@ -52,6 +52,15 @@ class AnalysisState(TypedDict, total=False):
     file_tree: list[dict]
     selected_files: list[dict]
     output_path: str
+    analysis_request: dict
+    source_files: list[dict]
+    missing_inputs: list[str]
+    input_manifest: dict
+    analysis_mode: str
+    content_chunks: list[dict]
+    chunk_index: dict
+    precheck_result: dict
+    analysis_limitations: dict
 
     # Analysis result
     status: AnalysisStatus
@@ -62,6 +71,11 @@ class AnalysisState(TypedDict, total=False):
     # Evidence-first analysis objects
     claims: Annotated[list[dict], operator.add]
     evidence_tasks: list[dict]
+    analysis_plan: dict
+    current_task_id: str | None
+    next_task_id: str | None
+    task_results: list[dict]
+    task_traces: list[dict]
     evidence_signals: Annotated[list[dict], operator.add]
     risk_signals: Annotated[list[dict], operator.add]
     followup_actions: list[dict]
@@ -75,5 +89,8 @@ class AnalysisState(TypedDict, total=False):
     quality_warnings: Annotated[list[str], operator.add]
     quality_errors: Annotated[list[str], operator.add]
     persisted_analysis: dict
+    final_result: dict
+    quality_gate_result: dict
+    callback_payload: dict
     retry_count: int
     error_message: str
