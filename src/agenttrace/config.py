@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 
@@ -9,8 +10,9 @@ from pathlib import Path
 class Settings:
     service_name: str = "agenttrace-ai"
     summary_model: str = "gpt-4o-mini"
-    repo_ingest_base_url: str = "http://100.91.255.31:8010"
-    repo_ingest_host_header: str | None = "localhost:8010"
+    repo_ingest_base_url: str = "https://gitingest.com"
+    agents_callback_url: str = "http://localhost:8080/api/v1/internal/analysis/callback"
+    repo_ingest_host_header: str | None = None
     enable_github_url_summary: bool = False
     openai_api_key: str | None = None
     openai_api_base: str | None = None
@@ -20,6 +22,7 @@ class Settings:
     langsmith_endpoint: str | None = None
 
 
+@lru_cache()
 def get_settings() -> Settings:
     env_values = _load_dotenv(Path(".env"))
     return Settings(
@@ -28,13 +31,19 @@ def get_settings() -> Settings:
         repo_ingest_base_url=_get_env(
             "AGENTTRACE_REPO_INGEST_BASE_URL",
             env_values,
-            "http://100.91.255.31:8010",
+            "https://gitingest.com",
         )
-        or "http://100.91.255.31:8010",
+        or "https://gitingest.com",
+        agents_callback_url=_get_env(
+            "AGENTS_CALLBACK_URL",
+            env_values,
+            "http://localhost:8080/api/v1/internal/analysis/callback",
+        )
+        or "http://localhost:8080/api/v1/internal/analysis/callback",
         repo_ingest_host_header=_get_env(
             "AGENTTRACE_REPO_INGEST_HOST_HEADER",
             env_values,
-            "localhost:8010",
+            None,
         ),
         enable_github_url_summary=_get_bool_env(
             "AGENTTRACE_ENABLE_GITHUB_URL_SUMMARY",

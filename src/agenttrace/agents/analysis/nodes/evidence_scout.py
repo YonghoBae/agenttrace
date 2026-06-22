@@ -2,104 +2,106 @@ from __future__ import annotations
 
 import re
 
-from agenttrace.agents.analysis.criteria.agent_type_keywords import EVIDENCE_PATH_HINTS
 from agenttrace.agents.analysis.state import AnalysisState
 
 
-CLAIM_KEYWORD_TOKENS = {
-    "skill", "skills", "plugin", "plugins", "hook", "hooks",
-    "script", "scripts", "test", "tests", "workflow", "workflows",
-    "plan", "debug", "review", "verify", "install",
-}
+def _current_task(state: AnalysisState) -> dict | None:
+    current_task_id = state.get("current_task_id")
+    for task in state.get("analysis_plan", {}).get("tasks", []):
+        if task.get("task_id") == current_task_id:
+            return task
+    return None
 
 
-def _path_signal_type(path: str, file_type: str | None = None) -> str:
-    lower_path = path.lower()
-    name = lower_path.rsplit("/", 1)[-1]
-
-    if file_type == "directory":
-        return "DIRECTORY"
-    if name in {"plugin.json", "mcp.json"} or "plugin" in lower_path:
-        return "CONFIG"
-    if "test" in lower_path:
-        return "TEST"
-    if name == "readme.md" or lower_path.endswith(".md"):
-        return "DOC"
-    if name in {"package.json", "pyproject.toml", "cargo.toml"}:
-        return "DEPENDENCY"
-    return "FILE_PATH"
+def _claim_texts(state: AnalysisState, task: dict) -> list[str]:
+    wanted = set(task.get("claims", []))
+    return [
+        claim.get("claim_text", "")
+        for claim in state.get("claims", [])
+        if claim.get("claim_id") in wanted
+    ]
 
 
-def _claim_keywords(claim_text: str) -> set[str]:
-    words = set(re.findall(r"[a-z0-9_-]+", claim_text.lower()))
-    return {
-        token.rstrip("s")
-        for token in CLAIM_KEYWORD_TOKENS
-        if token in words
-    }
+def _tokens(text: str) -> set[str]:
+    return {token.lower() for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", text)}
 
 
 def evidence_scout(state: AnalysisState) -> AnalysisState:
-    """Find static implementation evidence from file paths.
+    task = _current_task(state)
+    if not task:
+        return _legacy_evidence_scout(state)
 
-    MVP는 file tree만 사용합니다. 이후 selected file content까지 읽게 확장하면 됩니다.
-    """
-    agent_type = state.get("agent_type", "UNKNOWN")
-    file_tree = state.get("file_tree", [])
+    chunk_index = state.get("chunk_index", {})
+    entries = chunk_index.get("entries", [])
+    target_paths = [path.lower() for path in task.get("target_paths", [])]
+    query_tokens = set()
+    for text in _claim_texts(state, task):
+        query_tokens.update(_tokens(text))
+
+    chunks_by_id = chunk_index.get("chunks_by_id", {})
+    selected_chunks = list(chunks_by_id.values())
+    attempt = {
+        "attempt": 1,
+        "queries": sorted(query_tokens)[:20],
+        "candidate_chunk_ids": list(chunks_by_id.keys()),
+        "selected_chunk_ids": list(chunks_by_id.keys()),
+        "excluded_chunk_ids": [],
+        "exclusion_reasons": {},
+    }
+
+    return {
+        "selected_chunks": selected_chunks,
+        "search_attempt": attempt,
+    }
+
+
+def _legacy_evidence_scout(state: AnalysisState) -> AnalysisState:
     claims = state.get("claims", [])
-    hints = EVIDENCE_PATH_HINTS.get(agent_type, [])
-
-    evidence_signals: list[dict] = []
-    seen: set[tuple[str | None, str]] = set()
-
+    file_tree = state.get("file_tree", [])
+    agent_type = state.get("agent_type", "")
+    hints = {
+        "MCP_SERVER": ["mcp", "server", "tool"],
+        "SKILL": ["skill", "plugin", "workflow", "script"],
+        "EVAL_HARNESS": ["eval", "harness", "test", "benchmark"],
+        "AGENT_FRAMEWORK": ["agent", "workflow", "planner", "memory"],
+    }.get(agent_type, ["agent", "tool", "skill", "plugin", "server", "workflow"])
+    signals: list[dict] = []
     for claim in claims or [{"id": None, "claim_text": ""}]:
-        claim_id = claim.get("id")
-        claim_keywords = _claim_keywords(claim.get("claim_text", ""))
-        claim_file_tree = file_tree
-        if claim_keywords:
-            claim_file_tree = sorted(
-                file_tree,
-                key=lambda file_info: (
-                    _path_signal_type(file_info.get("path", ""), file_info.get("type")) != "CONFIG",
-                    not any(keyword in file_info.get("path", "").lower() for keyword in claim_keywords),
-                ),
-            )
-
-        for file_info in claim_file_tree:
-            path = file_info.get("path", "")
-            lower_path = path.lower()
-            matched_hints = [hint for hint in hints if hint.lower() in lower_path]
-            matched_keywords = sorted(keyword for keyword in claim_keywords if keyword in lower_path)
-            if not matched_hints and not matched_keywords:
+        claim_id = claim.get("id") or claim.get("claim_id")
+        claim_tokens = _tokens(claim.get("claim_text", ""))
+        per_claim = 0
+        for item in file_tree:
+            path = item.get("path", "") if isinstance(item, dict) else str(item)
+            lower = path.lower()
+            if not any(hint in lower for hint in hints) and not (claim_tokens & _tokens(path)):
                 continue
-
-            key = (claim_id, path)
-            if key in seen:
-                continue
-            seen.add(key)
-
-            matched_signals = matched_hints + matched_keywords
-            evidence_signals.append({
+            signals.append({
                 "claim_id": claim_id,
-                "signal_type": _path_signal_type(path, file_info.get("type")),
+                "signal_type": "FILE_PATH",
                 "path": path,
-                "summary": f"claim과 연결된 파일 경로 근거: {', '.join(matched_signals)}",
-                "confidence": min(0.5 + 0.1 * len(set(matched_signals)), 0.9),
+                "summary": "claim과 연결된 파일 경로 근거",
+                "confidence": 0.7,
             })
-            if len(evidence_signals) >= 16:
+            per_claim += 1
+            if per_claim >= 3:
                 break
-
-        if len(evidence_signals) >= 16:
-            break
-
-    if not evidence_signals:
+        if not any("plugin" in signal["path"].lower() for signal in signals if signal["claim_id"] == claim_id):
+            for item in file_tree:
+                path = item.get("path", "") if isinstance(item, dict) else str(item)
+                if "plugin" not in path.lower():
+                    continue
+                signals.append({
+                    "claim_id": claim_id,
+                    "signal_type": "FILE_PATH",
+                    "path": path,
+                    "summary": "claim과 연결된 plugin 파일 경로 근거",
+                    "confidence": 0.7,
+                })
+                break
+    if not signals:
         return {
             "status": "INSUFFICIENT_EVIDENCE",
             "evidence_signals": [],
             "quality_warnings": ["README claim을 뒷받침할 파일 경로 근거가 부족합니다."],
         }
-
-    return {
-        "status": "COLLECTED",
-        "evidence_signals": evidence_signals,
-    }
+    return {"status": "COLLECTED", "evidence_signals": signals}

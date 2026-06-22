@@ -1,6 +1,8 @@
 import json
+from pathlib import Path
 
 from agenttrace.agents.analysis.nodes.analyzer import analyzer
+from agenttrace.agents.analysis.nodes.collect_snapshot import collect_snapshot
 from agenttrace.agents.analysis.nodes.evidence_scout import evidence_scout
 from agenttrace.agents.analysis.nodes.quality_gate import quality_gate
 from agenttrace.agents.analysis.nodes.risk_and_followup import risk_and_followup_planner
@@ -19,7 +21,8 @@ def test_analyzer_detects_mcp_server():
 
 
 def test_analyzer_classifies_superpowers_as_skill():
-    with open("data/superpowers_repo.json") as fixture:
+    path = Path(__file__).parent.parent / "data" / "superpowers_repo.json"
+    with open(path) as fixture:
         state = json.load(fixture)
 
     result = analyzer(state)
@@ -62,7 +65,8 @@ def test_evidence_scout_finds_paths():
 
 
 def test_evidence_scout_links_superpowers_evidence_to_multiple_claims():
-    with open("data/superpowers_repo.json") as fixture:
+    path = Path(__file__).parent.parent / "data" / "superpowers_repo.json"
+    with open(path) as fixture:
         state = json.load(fixture)
 
     analyzed = analyzer(state)
@@ -79,7 +83,8 @@ def test_evidence_scout_links_superpowers_evidence_to_multiple_claims():
 
 
 def test_superpowers_followup_actions_are_user_action_labels():
-    with open("data/superpowers_repo.json") as fixture:
+    path = Path(__file__).parent.parent / "data" / "superpowers_repo.json"
+    with open(path) as fixture:
         state = json.load(fixture)
 
     analyzed = analyzer(state)
@@ -99,6 +104,7 @@ def test_superpowers_followup_actions_are_user_action_labels():
         for path in ("scripts/install.js", "package.json")
     )
     assert "ANALYSIS_UNCERTAIN" in risk_types
+
 
 def test_quality_gate_blocks_completed_without_evidence_for_claims():
     state = {
@@ -120,6 +126,7 @@ def test_quality_gate_blocks_completed_without_evidence_for_claims():
 
     assert result["status"] == "NEEDS_HUMAN_REVIEW"
     assert result["quality_errors"]
+
 
 def test_quality_gate_warns_uncertain_with_unlinked_claim_evidence():
     state = {
@@ -164,4 +171,79 @@ def test_quality_gate_warns_uncertain_with_unlinked_claim_evidence():
     assert result["quality_warnings"]
     assert any("claim-2" in warning for warning in result["quality_warnings"])
     assert "quality_errors" not in result
+
+
+def test_collect_snapshot_no_commit_sha():
+    state = {
+        "repository_snapshot": {
+            "full_name": "acme/harness",
+            "readme": "Some readme",
+            "file_tree": [{"path": "README.md"}],
+        }
+    }
+    result = collect_snapshot(state)
+    assert "commit_sha" not in result
+    assert "ingest_api_url" not in result
+    assert "quality_warnings" not in result
+
+
+def test_collect_snapshot_with_commit_sha_in_state():
+    state = {
+        "commit_sha": "abcdef123456",
+        "repository_snapshot": {
+            "full_name": "acme/harness",
+            "readme": "Some readme",
+            "file_tree": [{"path": "README.md"}],
+        }
+    }
+    result = collect_snapshot(state)
+    assert result["commit_sha"] == "abcdef123456"
+    assert result["ingest_api_url"] == "https://gitingest.com/api/acme/harness/commit/abcdef123456"
+    assert "스냅샷 생성 시점의 commit_sha와 실시간 분석 코드가 일치하지 않을 수 있습니다." in result["quality_warnings"]
+
+
+def test_collect_snapshot_with_commit_sha_in_snapshot():
+    state = {
+        "repository_snapshot": {
+            "commit_sha": "7890abcdef",
+            "full_name": "acme/harness",
+            "readme": "Some readme",
+            "file_tree": [{"path": "README.md"}],
+        }
+    }
+    result = collect_snapshot(state)
+    assert result["commit_sha"] == "7890abcdef"
+    assert result["ingest_api_url"] == "https://gitingest.com/api/acme/harness/commit/7890abcdef"
+    assert "스냅샷 생성 시점의 commit_sha와 실시간 분석 코드가 일치하지 않을 수 있습니다." in result["quality_warnings"]
+
+
+def test_collect_snapshot_with_commit_sha_in_metadata():
+    state = {
+        "repository_snapshot": {
+            "metadata": {"commit_sha": "1234567890"},
+            "full_name": "acme/harness",
+            "readme": "Some readme",
+            "file_tree": [{"path": "README.md"}],
+        }
+    }
+    result = collect_snapshot(state)
+    assert result["commit_sha"] == "1234567890"
+    assert result["ingest_api_url"] == "https://gitingest.com/api/acme/harness/commit/1234567890"
+    assert "스냅샷 생성 시점의 commit_sha와 실시간 분석 코드가 일치하지 않을 수 있습니다." in result["quality_warnings"]
+
+
+def test_collect_snapshot_github_url_fallback():
+    state = {
+        "commit_sha": "abcdef123456",
+        "repository_snapshot": {
+            "github_url": "https://github.com/example-owner/example-repo.git",
+            "readme": "Some readme",
+            "file_tree": [{"path": "README.md"}],
+        }
+    }
+    result = collect_snapshot(state)
+    assert result["commit_sha"] == "abcdef123456"
+    assert result["ingest_api_url"] == "https://gitingest.com/api/example-owner/example-repo/commit/abcdef123456"
+    assert "스냅샷 생성 시점의 commit_sha와 실시간 분석 코드가 일치하지 않을 수 있습니다." in result["quality_warnings"]
+
 

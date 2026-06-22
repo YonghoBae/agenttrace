@@ -2,44 +2,44 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+
 from agenttrace.agents.analysis.state import AnalysisState
 
 
-def _public_analysis(state: AnalysisState) -> dict:
-    return {
-        "run_id": state.get("run_id"),
-        "repository_id": state.get("repository_id"),
-        "full_name": state.get("full_name"),
-        "github_url": state.get("github_url"),
-        "status": state.get("status"),
-        "agent_type": state.get("agent_type"),
-        "relevance_score": state.get("relevance_score"),
-        "classification_reason": state.get("classification_reason"),
-        "claims": state.get("claims", []),
-        "evidence_signals": state.get("evidence_signals", []),
-        "risk_signals": state.get("risk_signals", []),
-        "followup_actions": state.get("followup_actions", []),
-        "followup_guide": state.get("followup_guide", []),
+def build_result_json(state: AnalysisState) -> dict:
+    return state.get("final_result", {})
+
+
+def persist_analysis(state: AnalysisState) -> AnalysisState:
+    payload = {
+        "analysis_id": state.get("run_id"),
+        "status": "COMPLETED",
+        "analysis_result": state.get("final_result"),
         "harness_relevance": state.get("harness_relevance", {}),
         "harness_capabilities": state.get("harness_capabilities", {}),
         "negative_evidence": state.get("negative_evidence", []),
         "followup_questions": state.get("followup_questions", []),
-        "quality_warnings": state.get("quality_warnings", []),
-        "quality_errors": state.get("quality_errors", []),
+        "trace": {
+            "run_id": state.get("run_id"),
+            "analysis_version": "analysis-v2",
+            "input_manifest": state.get("input_manifest", {}),
+            "precheck_result": state.get("precheck_result", {}),
+            "claims": state.get("claims", []),
+            "analysis_plan": state.get("analysis_plan", {}),
+            "task_traces": state.get("task_traces", []),
+            "final_result": state.get("final_result", {}),
+            "quality_gate_result": state.get("quality_gate_result", {}),
+        },
+        "error_message": None,
     }
-
-
-def persist_analysis(state: AnalysisState) -> AnalysisState:
-    """Persist analysis result.
-
-    MVP에서는 JSON 파일로 저장합니다. 운영에서는 이 함수에서 DB에 저장하면 됩니다.
-    """
-    analysis = _public_analysis(state)
 
     output_path = state.get("output_path")
     if output_path:
         path = Path(output_path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(analysis, ensure_ascii=False, indent=2), encoding="utf-8")
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    return {"persisted_analysis": analysis}
+    return {
+        "callback_payload": payload,
+        "persisted_analysis": payload,
+    }
