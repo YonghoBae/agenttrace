@@ -63,9 +63,33 @@ class AnalysisInputAssembler:
         }
         source_files = self.provided.load(request)
 
+        # 1순위: GitHub API 직접 수집
+        if not source_files and request.repository.github_url:
+            from agenttrace.config import get_settings
+            from agenttrace.agents.analysis.github_provider import GitHubInputProvider
+            settings = get_settings()
+            if settings.github_token:
+                commit_sha = (
+                    request.snapshot.commit_sha
+                    if request.snapshot and request.snapshot.commit_sha
+                    else "HEAD"
+                )
+                try:
+                    provider = GitHubInputProvider(token=settings.github_token)
+                    source_files = provider.load(
+                        github_url=request.repository.github_url,
+                        commit_sha=commit_sha,
+                    )
+                    input_manifest["source_provider"] = "github_api"
+                except Exception as exc:
+                    missing_inputs.append("github_source_files")
+                    input_manifest["github_error"] = str(exc)
+
+        # 2순위: gitingest fallback
         if not source_files and request.external_ingest.enabled:
             try:
                 source_files = self.gitingest.load(request)
+                input_manifest["source_provider"] = "gitingest"
             except AnalysisInputProviderError as exc:
                 source_files = []
                 missing_inputs.append("gitingest_file_content")
@@ -83,3 +107,4 @@ class AnalysisInputAssembler:
             missing_inputs=sorted(set(missing_inputs)),
             input_manifest=input_manifest,
         )
+

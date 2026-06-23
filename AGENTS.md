@@ -99,6 +99,7 @@ cp .env.example .env
 
 | 변수 | 설명 | 기본값 |
 |---|---|---|
+| `GITHUB_TOKEN` | GitHub API 토큰 (소스 직접 수집용) | - |
 | `OPENAI_API_KEY` | OpenAI API 키 | - |
 | `OPENAI_API_BASE` | API 엔드포인트 (커스텀 시) | OpenAI 공식 |
 | `AGENTTRACE_ANALYSIS_MODEL` | 분석 LLM 모델 | `gpt-4o-mini` |
