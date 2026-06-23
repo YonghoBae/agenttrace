@@ -174,4 +174,6 @@ def test_postgres_chunk_embedding_store_updates_rows():
 
     assert rows == [{"chunk_id": "chunk-a"}]
     assert "UPDATE source_chunks" in conn.calls[0][0]
-    assert conn.calls[0][1]["rows"][0]["chunk_id"] == "chunk-a"
+    import json
+    rows_data = json.loads(conn.calls[0][1]["rows"])
+    assert rows_data[0]["chunk_id"] == "chunk-a"

@@ -26,6 +26,15 @@ active_analyses = set()
 analysis_job_store = InMemoryAnalysisJobStore()
 
 
+def init_api_stores(database_url: str) -> None:
+    global analysis_job_store
+    from agenttrace.services.database import PsycopgSqlConnection
+    from agenttrace.services.analysis_jobs import PostgresAnalysisJobStore
+    conn = PsycopgSqlConnection(database_url)
+    analysis_job_store = PostgresAnalysisJobStore(conn)
+
+
+
 class AnalysisRequest(BaseModel):
     analysis_id: UUID4
     repository: dict[str, Any] | None = None
@@ -34,7 +43,7 @@ class AnalysisRequest(BaseModel):
     file_tree: list[str] = Field(default_factory=list)
     summary_result: dict[str, Any] = Field(default_factory=dict)
     source_files: list[dict[str, Any]] = Field(default_factory=list)
-    external_ingest: dict[str, Any] = Field(default_factory=lambda: {"enabled": False, "provider": "gitingest"})
+    external_ingest: dict[str, Any] = Field(default_factory=lambda: {"enabled": get_settings().external_ingest_enabled, "provider": "gitingest"})
 
     # Legacy Backend payload
     repository_id: UUID4 | None = None
@@ -71,7 +80,7 @@ class AnalysisRequest(BaseModel):
             "file_tree": file_tree,
             "summary_result": {},
             "source_files": [],
-            "external_ingest": {"enabled": False, "provider": "gitingest"},
+            "external_ingest": {"enabled": get_settings().external_ingest_enabled, "provider": "gitingest"},
         })
 
 
@@ -168,8 +177,8 @@ def _compat_result_json(analysis_result: dict[str, Any], input_req: AnalysisInpu
         })
 
     limitations = analysis_result.get("analysis_limitations", {})
-    agent_type = agent_type_map.get(analysis_result.get("agent_type"), "UNKNOWN")
-    if agent_type == "UNKNOWN":
+    agent_type = agent_type_map.get(analysis_result.get("agent_type"), "Unknown")
+    if agent_type == "Unknown":
         text = " ".join([
             input_req.repository.full_name,
             input_req.repository.description or "",
@@ -177,11 +186,11 @@ def _compat_result_json(analysis_result: dict[str, Any], input_req: AnalysisInpu
             input_req.readme_text or "",
         ]).lower()
         if "harness" in text or "eval" in text or "benchmark" in text:
-            agent_type = "EVAL_HARNESS"
+            agent_type = "Eval"
         elif "mcp" in text:
-            agent_type = "MCP_SERVER"
+            agent_type = "MCP"
         elif "skill" in text:
-            agent_type = "SKILL"
+            agent_type = "Skill"
 
     return {
         "agent_type": agent_type,
@@ -208,7 +217,68 @@ async def run_pipeline_async(req: AnalysisRequest) -> None:
     try:
         logger.info("Starting async analysis pipeline for run_id=%s", req.analysis_id)
         input_req = await req.to_input_request()
-        graph = build_graph()
+
+        settings = get_settings()
+        from agenttrace.services.database import PsycopgSqlConnection, init_database
+        from agenttrace.services.content_indices import PostgresContentIndexStore, PostgresAnalysisPersistenceStore
+        from agenttrace.services.embeddings import PostgresChunkEmbeddingStore, build_openai_embedding_service
+
+        init_database(settings.database_url)
+        conn = PsycopgSqlConnection(settings.database_url)
+
+        # Defensive insert for repositories and snapshots to prevent foreign key errors in test/transient runs
+        try:
+            repo_id = str(req.repository_id) if req.repository_id else str(input_req.repository.repository_id) if (input_req.repository and input_req.repository.repository_id) else None
+            snap_id = str(req.snapshot_id) if req.snapshot_id else str(input_req.snapshot.snapshot_id) if (input_req.snapshot and input_req.snapshot.snapshot_id) else None
+            commit_sha = (input_req.snapshot.commit_sha if input_req.snapshot else None) or req.commit_sha or "main"
+            
+            if repo_id:
+                import hashlib
+                github_id = int(hashlib.md5(repo_id.encode()).hexdigest()[:15], 16)
+                temp_name = f"temp_{repo_id}"
+                conn.execute(
+                    """
+                    INSERT INTO repositories (
+                        id, github_id, full_name, owner, name, 
+                        stars, forks, watchers, open_issues, 
+                        archived, fork, agent_score, is_agent_related,
+                        created_at, updated_at
+                    ) VALUES (
+                        %(repo_id)s, %(github_id)s, %(full_name)s, %(owner)s, %(name)s,
+                        0, 0, 0, 0,
+                        false, false, 0, false,
+                        now(), now()
+                    ) ON CONFLICT DO NOTHING
+                    """,
+                    {
+                        "repo_id": repo_id,
+                        "github_id": github_id,
+                        "full_name": temp_name,
+                        "owner": "temp_owner",
+                        "name": temp_name
+                    }
+                )
+            if snap_id and repo_id:
+                conn.execute(
+                    """
+                    INSERT INTO repository_snapshots (snapshot_id, repository_id, commit_sha, captured_at)
+                    VALUES (%(snap_id)s, %(repo_id)s, %(commit_sha)s, now())
+                    ON CONFLICT (snapshot_id) DO NOTHING
+                    """,
+                    {"snap_id": snap_id, "repo_id": repo_id, "commit_sha": commit_sha}
+                )
+        except Exception as insert_exc:
+            logger.warning("Defensive insert of parent records failed: %s", insert_exc)
+
+        content_index_store = PostgresContentIndexStore(conn)
+        embedding_store = PostgresChunkEmbeddingStore(conn)
+        embedding_service = build_openai_embedding_service(settings)
+
+        graph = build_graph(
+            content_index_store=content_index_store,
+            embedding_service=embedding_service,
+            embedding_store=embedding_store,
+        )
         result = await asyncio.to_thread(
             graph.invoke,
             {
@@ -223,11 +293,44 @@ async def run_pipeline_async(req: AnalysisRequest) -> None:
                 "task_traces": [],
             },
         )
+        print("LANGGRAPH RESULT:", {k: v for k, v in result.items() if k != "content_chunks"})
         payload = result.get("callback_payload") or _failure_payload(req, RuntimeError("missing callback payload"))
         if payload.get("analysis_result") is not None:
             payload["result_json"] = _compat_result_json(payload["analysis_result"], input_req)
 
-        settings = get_settings()
+        # Save actual analysis results to Postgres DB
+        try:
+            persistence_store = PostgresAnalysisPersistenceStore(conn)
+            analysis_data = {
+                "analysis_id": run_id,
+                "repository_id": str(req.repository_id) if req.repository_id else str(input_req.repository.repository_id) if input_req.repository.repository_id else None,
+                "snapshot_id": str(req.snapshot_id) if req.snapshot_id else str(input_req.snapshot.snapshot_id) if input_req.snapshot.snapshot_id else None,
+                "analysis_version": "analysis-v2",
+                "status": payload.get("status", "COMPLETED").lower(),
+                "agent_type": {
+                    "MCP_SERVER": "MCP",
+                    "SKILL": "Skill",
+                    "EVAL_HARNESS": "Eval",
+                    "TOOL_USE": "ToolUse",
+                    "AGENT_FRAMEWORK": "Framework",
+                    "OTHER": "Other",
+                    "UNKNOWN": "Unknown"
+                }.get(payload.get("result_json", {}).get("agent_type"), "Unknown"),
+                "result_json": payload.get("result_json", {}),
+                "model_name": settings.analysis_model,
+                "prompt_version": "v2",
+            }
+            report_data = {
+                "analysis_id": run_id,
+                "lang": payload.get("analysis_report", {}).get("lang", "ko"),
+                "title": payload.get("analysis_report", {}).get("title", "AgentTrace 기술 분석 보고서"),
+                "body_markdown": payload.get("analysis_report", {}).get("body_markdown", ""),
+            }
+            persistence_store.persist_analysis(analysis=analysis_data, report=report_data)
+            logger.info("Successfully persisted analysis results to DB for run_id=%s", req.analysis_id)
+        except Exception as db_exc:
+            logger.error("Failed to persist analysis results to DB for run_id=%s: %s", req.analysis_id, db_exc)
+
         await asyncio.to_thread(httpx.post, settings.agents_callback_url, json=payload, timeout=10.0)
         logger.info("Successfully completed analysis pipeline for run_id=%s", req.analysis_id)
     except Exception as exc:
@@ -300,7 +403,7 @@ async def trigger_repository_analysis(
         commit_sha=request.commit_sha,
         github_url=request.github_url,
         source_files=request.source_files,
-        external_ingest={"enabled": False, "provider": "gitingest"},
+        external_ingest={"enabled": get_settings().external_ingest_enabled, "provider": "gitingest"},
     )
     if requested.should_start:
         active_analyses.add(requested.job_id)

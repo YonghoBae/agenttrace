@@ -259,6 +259,136 @@ class PostgresAnalysisJobStore:
     def __init__(self, connection: SqlConnection) -> None:
         self._connection = connection
 
+    def request_analysis(
+        self,
+        *,
+        repository_id: str,
+        snapshot_id: str,
+        analysis_version: str,
+    ) -> AnalysisRequestRecord:
+        params = {
+            "repository_id": repository_id,
+            "snapshot_id": snapshot_id,
+            "analysis_version": analysis_version,
+        }
+        sqls = PostgresAnalysisJobSql.request_analysis()
+        completed = self._connection.execute(sqls["find_completed"], params)
+        if completed:
+            return AnalysisRequestRecord(
+                job_id=None,
+                analysis_id=str(completed[0]["analysis_id"]),
+                status=completed[0]["status"],
+                is_cached=True,
+                requested_at=_utc_now(),
+                should_start=False,
+            )
+        running = self._connection.execute(sqls["find_running"], params)
+        if running:
+            return AnalysisRequestRecord(
+                job_id=str(running[0]["job_id"]),
+                analysis_id=None,
+                status=running[0]["status"].lower(),
+                is_cached=False,
+                requested_at=_utc_now(),
+                should_start=False,
+            )
+        new_job = self._connection.execute(sqls["insert_job"], params)
+        if new_job:
+            return AnalysisRequestRecord(
+                job_id=str(new_job[0]["job_id"]),
+                analysis_id=None,
+                status=new_job[0]["status"].lower(),
+                is_cached=False,
+                requested_at=_utc_now(),
+                should_start=True,
+            )
+        raise RuntimeError("Failed to request analysis job")
+
+    def get_status(self, *, repository_id: str, job_id: str) -> dict[str, Any] | None:
+        sql = """
+            SELECT job_id, analysis_id, status, error_message, updated_at
+            FROM analysis_jobs
+            WHERE repository_id = %(repository_id)s AND job_id = %(job_id)s
+        """
+        rows = self._connection.execute(sql, {"repository_id": repository_id, "job_id": job_id})
+        if not rows:
+            return None
+        job = rows[0]
+        return {
+            "jobId": str(job["job_id"]),
+            "analysisId": str(job["analysis_id"]) if job["analysis_id"] else None,
+            "status": job["status"].lower(),
+            "errorMessage": job["error_message"],
+            "updatedAt": job["updated_at"].isoformat() if hasattr(job["updated_at"], "isoformat") else str(job["updated_at"]),
+        }
+
+    def get_analysis(self, *, repository_id: str, analysis_id: str | None) -> dict[str, Any] | None:
+        if analysis_id:
+            sql = """
+                SELECT * FROM repository_analyses
+                WHERE repository_id = %(repository_id)s AND analysis_id = %(analysis_id)s
+            """
+            params = {"repository_id": repository_id, "analysis_id": analysis_id}
+        else:
+            sql = """
+                SELECT * FROM repository_analyses
+                WHERE repository_id = %(repository_id)s
+                ORDER BY analysis_completed_at DESC NULLS LAST, created_at DESC
+                LIMIT 1
+            """
+            params = {"repository_id": repository_id}
+
+        rows = self._connection.execute(sql, params)
+        if not rows:
+            return None
+        row = rows[0]
+        result = dict(row["result_json"]) if row.get("result_json") else {}
+        result.update({
+            "analysisId": str(row["analysis_id"]),
+            "repositoryId": str(row["repository_id"]),
+            "snapshotId": str(row["snapshot_id"]),
+            "analysisVersion": row["analysis_version"],
+            "status": row["status"],
+            "agentType": row["agent_type"],
+            "analysisCompletedAt": row["analysis_completed_at"].isoformat() if hasattr(row["analysis_completed_at"], "isoformat") and row["analysis_completed_at"] else str(row["analysis_completed_at"]) if row["analysis_completed_at"] else None,
+        })
+        return result
+
+    def get_report(self, *, repository_id: str, analysis_id: str | None, lang: str) -> dict[str, Any] | None:
+        if analysis_id:
+            sql = """
+                SELECT r.*, a.analysis_id
+                FROM analysis_reports r
+                JOIN repository_analyses a ON r.analysis_id = a.analysis_id
+                WHERE a.repository_id = %(repository_id)s 
+                  AND a.analysis_id = %(analysis_id)s
+                  AND r.lang = %(lang)s
+            """
+            params = {"repository_id": repository_id, "analysis_id": analysis_id, "lang": lang}
+        else:
+            sql = """
+                SELECT r.*, a.analysis_id
+                FROM analysis_reports r
+                JOIN repository_analyses a ON r.analysis_id = a.analysis_id
+                WHERE a.repository_id = %(repository_id)s 
+                  AND r.lang = %(lang)s
+                ORDER BY r.updated_at DESC, r.created_at DESC
+                LIMIT 1
+            """
+            params = {"repository_id": repository_id, "lang": lang}
+
+        rows = self._connection.execute(sql, params)
+        if not rows:
+            return None
+        row = rows[0]
+        return {
+            "analysisId": str(row["analysis_id"]),
+            "lang": row["lang"],
+            "title": row["title"],
+            "bodyMarkdown": row["body_markdown"],
+            "generatedAt": row["updated_at"].isoformat() if hasattr(row["updated_at"], "isoformat") else str(row["updated_at"]),
+        }
+
     def claim_next_job(self) -> dict[str, Any] | None:
         rows = self._connection.execute(PostgresAnalysisJobSql.claim_next_job())
         return rows[0] if rows else None
@@ -289,6 +419,7 @@ class PostgresAnalysisJobStore:
 
     def fail_stale_running_jobs(self) -> list[dict[str, Any]]:
         return self._connection.execute(PostgresAnalysisJobSql.fail_stale_running_jobs())
+
 
 
 AnalysisJobRunner = Callable[[dict[str, Any]], dict[str, Any]]

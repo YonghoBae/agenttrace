@@ -132,4 +132,5 @@ class PostgresChunkEmbeddingStore:
     def update_embeddings(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not rows:
             return []
-        return self._connection.execute(PostgresChunkEmbeddingSql.update_embeddings(), {"rows": rows})
+        import json
+        return self._connection.execute(PostgresChunkEmbeddingSql.update_embeddings(), {"rows": json.dumps(rows)})

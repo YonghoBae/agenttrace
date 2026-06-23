@@ -281,6 +281,8 @@ def test_repository_analysis_report_returns_camel_case_markdown_contract(monkeyp
     assert set(response.json()) == {"analysisId", "lang", "title", "bodyMarkdown", "generatedAt"}
 
 
+
+
 def test_repository_analysis_result_returns_structured_camel_case_contract(monkeypatch) -> None:
     active_analyses.clear()
 

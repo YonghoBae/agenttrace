@@ -23,6 +23,9 @@ class Settings:
     langsmith_api_key: str | None = None
     langsmith_project: str | None = None
     langsmith_endpoint: str | None = None
+    database_url: str = "postgresql://agenthub_user:agenthub_password@localhost:5432/agenthub"
+    external_ingest_enabled: bool = False
+
 
 
 @lru_cache()
@@ -54,6 +57,11 @@ def get_settings() -> Settings:
             env_values,
             False,
         ),
+        external_ingest_enabled=_get_bool_env(
+            "AGENTTRACE_EXTERNAL_INGEST_ENABLED",
+            env_values,
+            False,
+        ),
         embedding_model=_get_env(
             "AGENTTRACE_EMBEDDING_MODEL",
             env_values,
@@ -77,7 +85,14 @@ def get_settings() -> Settings:
         langsmith_api_key=_get_env("LANGSMITH_API_KEY", env_values),
         langsmith_project=_get_env("LANGSMITH_PROJECT", env_values),
         langsmith_endpoint=_get_env("LANGSMITH_ENDPOINT", env_values),
+        database_url=_get_env(
+            "DATABASE_URL",
+            env_values,
+            "postgresql://agenthub_user:agenthub_password@localhost:5432/agenthub",
+        )
+        or "postgresql://agenthub_user:agenthub_password@localhost:5432/agenthub",
     )
+
 
 
 def configure_runtime_environment(settings: Settings | None = None) -> Settings:

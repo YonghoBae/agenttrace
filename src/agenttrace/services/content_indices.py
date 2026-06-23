@@ -159,6 +159,16 @@ class PostgresContentIndexStore:
         rows = self._connection.execute(PostgresContentIndexSql.claim_next_build())
         return rows[0] if rows else None
 
+    def upsert_chunks(self, snapshot_id: str, chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not chunks:
+            return []
+        import json
+        params = {
+            "snapshot_id": snapshot_id,
+            "chunks": json.dumps(chunks),
+        }
+        return self._connection.execute(PostgresSourceChunkSql.upsert_chunks(), params)
+
 
 class PostgresAnalysisReportSql:
     @staticmethod
@@ -210,7 +220,7 @@ class PostgresRepositoryAnalysisSql:
         return """
             CREATE TABLE repository_analyses (
                 analysis_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-                repository_id uuid NOT NULL REFERENCES repositories(repository_id) ON DELETE CASCADE,
+                repository_id uuid NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
                 snapshot_id uuid NOT NULL REFERENCES repository_snapshots(snapshot_id) ON DELETE CASCADE,
                 analysis_version varchar(50) NOT NULL,
                 status varchar(40) NOT NULL,
@@ -233,6 +243,7 @@ class PostgresRepositoryAnalysisSql:
     def upsert_analysis() -> str:
         return """
             INSERT INTO repository_analyses (
+                analysis_id,
                 repository_id,
                 snapshot_id,
                 analysis_version,
@@ -246,6 +257,7 @@ class PostgresRepositoryAnalysisSql:
                 updated_at
             )
             VALUES (
+                %(analysis_id)s,
                 %(repository_id)s,
                 %(snapshot_id)s,
                 %(analysis_version)s,
@@ -283,7 +295,7 @@ class PostgresSourceChunkSql:
                 start_line integer,
                 end_line integer,
                 symbol text,
-                content_hash varchar(64) NOT NULL,
+                content_hash varchar(120) NOT NULL,
                 chunk_type varchar(30) NOT NULL DEFAULT 'code',
                 embedding vector(1536),
                 created_at timestamptz NOT NULL DEFAULT now(),
@@ -346,9 +358,14 @@ class PostgresAnalysisPersistenceStore:
         self._connection = connection
 
     def persist_analysis(self, *, analysis: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
+        import json
+        analysis_params = dict(analysis)
+        if "result_json" in analysis_params and isinstance(analysis_params["result_json"], dict):
+            analysis_params["result_json"] = json.dumps(analysis_params["result_json"])
+            
         analysis_rows = self._connection.execute(
             PostgresRepositoryAnalysisSql.upsert_analysis(),
-            analysis,
+            analysis_params,
         )
         analysis_id = (
             analysis_rows[0].get("analysis_id")
