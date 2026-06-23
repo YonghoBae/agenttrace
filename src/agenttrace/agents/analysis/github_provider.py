@@ -47,27 +47,74 @@ def _is_source_file(path: str, size: int) -> bool:
         return False
     lower = path.lower()
     # Dockerfile 계열
-    if "dockerfile" in lower.split("/")[-1].lower():
+    if "dockerfile" in lower.split("/")[-1]:
         return True
     return any(lower.endswith(ext) for ext in SOURCE_EXTENSIONS)
 
 
-def _score_file_path(path: str) -> int:
+# 항상 포함을 보장할 중요 설정 파일 파터는 이름/경로 기준
+# 알고리듬 문서 §12 (중요 설정 파일 보호) 참조
+_CRITICAL_CONFIG_NAMES: frozenset[str] = frozenset({
+    # 패키지/빌드 매니페스트
+    "pyproject.toml", "requirements.txt", "setup.py", "setup.cfg",
+    "package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+    "go.mod", "go.sum", "cargo.toml", "cargo.lock",
+    "pom.xml", "build.gradle", "build.gradle.kts", "gemfile",
+    # 컨테이너/배포
+    "dockerfile", "docker-compose.yml", "docker-compose.yaml",
+    "serverless.yml", "serverless.yaml",
+    # API/DB 스키마
+    "openapi.yaml", "openapi.yml", "swagger.yaml", "swagger.yml",
+    "schema.sql",
+    # 프로젝트 설정
+    "tsconfig.json", "jest.config.js", "jest.config.ts",
+    "pytest.ini", "tox.ini", "mypy.ini", ".env.example",
+    "makefile",
+})
+
+
+def _is_critical_config(path: str) -> bool:
+    """Always-include 파일 보호 목록에 해당하는지 확인한다.
+
+    다음 파일은 MAX_FILES 제한과 무관하게 항상 포함을 보장한다.
+    - 패키지/빌드 매니페스트
+    - Dockerfile 계열
+    - CI/CD (.github/workflows 하위 yml/yaml)
+    - API 스키마 및 DB DDL
+    - 주요 툴체인 설정
+    """
     lower = path.lower()
-    # 1. Core source directory weights
-    for source_dir in ["src/", "lib/", "app/", "packages/", "srcs/"]:
-        if lower.startswith(source_dir) or f"/{source_dir}" in lower:
-            return 100
-    
-    # 2. Documents and minor metadata penalties
-    if lower.endswith(".md") or lower.endswith(".mdx") or "license" in lower or ".github/" in lower:
-        return -50
-        
-    # 3. Environment configuration files penalties
-    if any(lower.endswith(ext) for ext in [".json", ".yaml", ".yml", ".toml", ".ini", ".cfg"]):
-        return -20
-        
-    return 0
+    filename = lower.split("/")[-1]
+
+    # 파일명 일치
+    if filename in _CRITICAL_CONFIG_NAMES:
+        return True
+
+    # Dockerfile 계열 (접두어 포함: Dockerfile.dev 등)
+    if "dockerfile" in filename:
+        return True
+
+    # CI/CD: .github/workflows 하위의 yml/yaml
+    if ".github/workflows/" in lower and (lower.endswith(".yml") or lower.endswith(".yaml")):
+        return True
+
+    return False
+
+
+def _select_blobs(blobs: list[dict]) -> list[dict]:
+    """MAX_FILES 제한 안에서 파일을 선별한다.
+
+    중요 설정 파일은 항상 포함을 보장한다.
+    나머지 슬롯은 입력 순서(트리 API 반환 순서)를 유지한 대로 체운다.
+    """
+    if len(blobs) <= MAX_FILES:
+        return blobs
+
+    guaranteed = [b for b in blobs if _is_critical_config(b["path"])]
+    rest = [b for b in blobs if not _is_critical_config(b["path"])]
+
+    remaining_slots = MAX_FILES - len(guaranteed)
+    return guaranteed + rest[:max(remaining_slots, 0)]
 
 
 class GitHubInputProvider:
@@ -100,15 +147,13 @@ class GitHubInputProvider:
         if data.get("truncated"):
             logger.warning("GitHub tree response truncated for %s/%s", owner, repo)
 
-        # 2. Source file filtering and importance sorting
+        # 2. 소스 파일 필터링 및 중요 파일 보유 선별
         all_blobs = [
             item for item in data.get("tree", [])
             if item["type"] == "blob"
             and _is_source_file(item["path"], item.get("size", 0))
         ]
-        # Sort so that highest score files come first
-        all_blobs.sort(key=lambda item: _score_file_path(item["path"]), reverse=True)
-        blobs = all_blobs[:MAX_FILES]
+        blobs = _select_blobs(all_blobs)
 
         logger.info(
             "GitHub provider: %d source files selected from %s/%s@%s",
