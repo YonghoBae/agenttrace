@@ -234,3 +234,9 @@ docker compose logs api | grep '"event":"완료"' | jq '{node,run_id,duration_ms
 
 - 로그에 API 키, 소스코드 전체 내용, 개인정보 포함 금지.
 - `logger.bind()` 결과를 함수 내 `log` 변수로 받아서 사용 (전역 logger는 컨텍스트 없음).
+
+## Troubleshooting & Learnings
+
+- 개발 과정에서 겪은 중요한 시행착오 및 트러블슈팅 사례는 [docs/troubleshooting_learnings.md](file:///Users/wolyong/workspace/AgentHub/agenttrace/docs/troubleshooting_learnings.md)에 기록되어 있습니다.
+- 새로운 트러블슈팅 사례가 발견되면 반드시 해당 문서에 추가하여 미래의 에이전트 작업 시 참고할 수 있도록 합니다.
+
