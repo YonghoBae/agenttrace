@@ -48,3 +48,15 @@
 * **문제 현상**: 과도기적/독립적 워커 런 실행 시 parent 레코드 누락으로 인한 외래키(Foreign Key) 무결성 에러 발생 가능성 존재.
 * **해결 방법**:
   [worker.py](file:///Users/wolyong/workspace/AgentHub/agenttrace/src/agenttrace/app/worker.py) 내 `run_analysis_pipeline` 진입 시 `repositories` 및 `repository_snapshots` 테이블에 방어적 삽입(`INSERT ON CONFLICT DO NOTHING`)을 수행하여 외래키 에러를 예방합니다.
+
+---
+
+## 4. pytest 환경에서의 structlog sys.stderr 바인딩 closed file 에러
+
+* **문제 현상**: CLI 표준 출력 오염 방지를 위해 로깅 출력을 `sys.stderr`로 변경 후, pytest 실행 시 일부 CLI 테스트에서 `ValueError: I/O operation on closed file.` 발생.
+* **원인**:
+  pytest는 각 테스트 진행 시 표준 입출력 스트림(`sys.stdout`, `sys.stderr`)을 동적으로 캡처하고 테스트 종료 시 닫습니다. `setup_logging` 호출 단계에서 `structlog.PrintLoggerFactory(sys.stderr)` 형태로 넘기면, 해당 시점에 바인딩되어 있던 특정 파일 객체(`sys.stderr`)를 상시 캐싱하게 됩니다. 이로 인해 다음 테스트 차례에 이미 닫혀버린 파일 객체에 접근을 시도하여 오류가 유발됩니다.
+* **해결 방법**:
+  런타임에 동적으로 `sys.stderr`를 조회하여 기록하는 `StderrPrintLogger` 클래스를 구현하고, `logger_factory`를 `lambda *args, **kwargs: StderrPrintLogger()` 형태로 동적 할당하도록 구조화하여 문제를 해결했습니다.
+* **레슨 런**: 글로벌 싱글톤이나 한 번만 설정되는 프레임워크 로깅 초기화 시, 테스트 러너가 가로채어 관리하는 시스템 스트림 파일 객체를 직접 참조 보관해서는 안 됩니다. 반드시 지연 평가(Lazy evaluation)를 통해 런타임의 최신 파일 핸들을 획득하도록 구현해야 합니다.
+

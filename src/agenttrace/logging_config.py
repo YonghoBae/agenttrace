@@ -20,8 +20,24 @@ from __future__ import annotations
 import logging
 import sys
 import time
+from threading import Lock
 
 import structlog
+
+
+class StderrPrintLogger:
+    """sys.stderr를 런타임에 동적으로 해석하여 출력하는 로그 출력기.
+    pytest 등의 환경에서 sys.stderr 파일 객체가 테스트 간에 변경/교체되어도
+    closed file 관련 ValueError가 발생하지 않도록 방지합니다.
+    """
+    _lock = Lock()
+
+    def msg(self, message: str) -> None:
+        with self._lock:
+            sys.stderr.write(message + "\n")
+            sys.stderr.flush()
+
+    log = debug = info = warn = warning = error = critical = failure = msg
 
 
 def setup_logging(level: str = "INFO") -> None:
@@ -31,7 +47,7 @@ def setup_logging(level: str = "INFO") -> None:
     # stdlib logging 설정 (uvicorn, httpx 등 외부 라이브러리용)
     logging.basicConfig(
         format="%(message)s",
-        stream=sys.stdout,
+        stream=sys.stderr,
         level=numeric_level,
     )
 
@@ -49,7 +65,7 @@ def setup_logging(level: str = "INFO") -> None:
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(numeric_level),
-        logger_factory=structlog.PrintLoggerFactory(sys.stdout),
+        logger_factory=lambda *args, **kwargs: StderrPrintLogger(),
         cache_logger_on_first_use=True,
     )
 
