@@ -16,5 +16,6 @@ data/context7_snapshot.json
 # Local agents configuration and runtime artifacts
 .langgraph_api/
 .agents/
+.opencode/
 
 
