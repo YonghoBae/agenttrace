@@ -6,9 +6,13 @@ from agenttrace.agents.analysis.state import AnalysisState
 def analysis_precheck(state: AnalysisState) -> AnalysisState:
     has_readme = bool((state.get("readme") or "").strip())
     has_file_tree = bool(state.get("file_tree"))
-    has_repo_map = bool(state.get("repo_map_render") or state.get("definition_ranks"))
+    has_repo_map = bool(
+        state.get("repo_map_render")
+        or state.get("definition_ranks")
+        or state.get("repo_map")
+    )
     missing_inputs = list(state.get("missing_inputs", []))
-    can_analyze = has_readme or has_file_tree
+    can_analyze = has_readme or has_file_tree or has_repo_map
     analysis_mode = "normal" if has_repo_map else "limited"
     limitations = {
         "missing_inputs": missing_inputs,

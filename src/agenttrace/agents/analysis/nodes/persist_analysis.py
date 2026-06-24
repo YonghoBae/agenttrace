@@ -38,8 +38,11 @@ def persist_analysis(state: AnalysisState) -> AnalysisState:
             "analysis_version": "analysis-v2",
             "input_manifest": state.get("input_manifest", {}),
             "precheck_result": state.get("precheck_result", {}),
-            "final_result": state.get("final_result", {}),
+            "evidence_refs": state.get("evidence_refs", []),
+            "evidence_signals": state.get("evidence_signals", []),
+            "analysis_limitations": state.get("analysis_limitations", {}),
             "quality_gate_result": state.get("quality_gate_result", {}),
+            "final_result": state.get("final_result", {}),
         },
         "error_message": None,
     }

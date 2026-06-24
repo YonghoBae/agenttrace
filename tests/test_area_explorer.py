@@ -87,6 +87,7 @@ def test_mock_result_uses_repo_map_and_source_files_as_evidence(tmp_path):
     assert result["evidence_refs"]
     assert result["evidence_refs"][0]["path"] == "src/server.ts"
     assert result["evidence_refs"][0]["source_type"] == "code"
+    assert result["evidence_refs"][0]["content_hash"].startswith("sha256:")
     assert result["agent_type"] == "MCP"
     assert any(
         af["status"] in {"confirmed", "partially_confirmed"}
@@ -128,6 +129,76 @@ def test_mock_result_prioritizes_implementation_over_tests(tmp_path):
     result = _build_mock_result(state)
 
     assert result["evidence_refs"][0]["path"] == "src/server.ts"
+
+
+def test_mock_result_prioritizes_core_server_over_cli_command_for_context_repos(tmp_path):
+    repo = tmp_path / "repo"
+    (repo / "packages" / "cli" / "src" / "commands").mkdir(parents=True)
+    (repo / "packages" / "mcp" / "src").mkdir(parents=True)
+    (repo / "packages" / "cli" / "src" / "commands" / "docs.ts").write_text(
+        "export function docsCommand() { return 'docs'; }\n",
+        encoding="utf-8",
+    )
+    (repo / "packages" / "mcp" / "src" / "server.ts").write_text(
+        "export function createMcpServer() { return { tool: 'resolve-library-id' }; }\n",
+        encoding="utf-8",
+    )
+    state = {
+        "local_repo_dir": str(repo),
+        "repo_map": {
+            "files": {
+                "packages/cli/src/commands/docs.ts": {
+                    "definitions": ["docsCommand"],
+                    "references": ["docs", "context", "search", "api"],
+                    "category": "source",
+                },
+                "packages/mcp/src/server.ts": {
+                    "definitions": ["createMcpServer"],
+                    "references": ["mcp", "server", "tool", "resolve-library-id"],
+                    "category": "source",
+                },
+            }
+        },
+        "file_catalog": [
+            {"path": "packages/cli/src/commands/docs.ts", "category": "source"},
+            {"path": "packages/mcp/src/server.ts", "category": "source"},
+        ],
+    }
+
+    result = _build_mock_result(state)
+    refs_by_id = {ref["id"]: ref for ref in result["evidence_refs"]}
+    execution = next(area for area in result["area_findings"] if area["area_id"] == "execution-flow")
+    first_execution_ref = execution["findings"][0]["evidence_refs"][0]
+
+    assert result["evidence_refs"][0]["path"] == "packages/mcp/src/server.ts"
+    assert refs_by_id[first_execution_ref]["path"] == "packages/mcp/src/server.ts"
+
+
+def test_mock_result_never_marks_fallback_areas_confirmed(tmp_path):
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "server.ts").write_text("export function serve() {}\n", encoding="utf-8")
+    state = {
+        "local_repo_dir": str(repo),
+        "repo_map": {
+            "files": {
+                "src/server.ts": {
+                    "definitions": ["serve"],
+                    "references": ["server"],
+                    "category": "source",
+                }
+            }
+        },
+        "file_catalog": [{"path": "src/server.ts", "category": "source"}],
+    }
+
+    result = _build_mock_result(state)
+
+    assert {area["status"] for area in result["area_findings"]} <= {
+        "partially_confirmed",
+        "unconfirmed",
+        "not_applicable",
+    }
 
 
 def test_sanitize_ref_fixes_invalid_line_numbers():
@@ -203,6 +274,81 @@ def test_area_explorer_with_mock_agent(monkeypatch):
     assert result["evidence_refs"][0]["id"] == "ref-1"
     assert len(result["evidence_signals"]) == 2
     assert result["synthesis"]["analysis_status"] == "completed"
+
+
+def test_area_explorer_hydrates_agent_evidence_from_source_file(monkeypatch, tmp_path):
+    """Agent evidence paths must be backed by actual source excerpts."""
+    import agenttrace.agents.analysis.nodes.area_explorer as ae_module
+
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "main.py").write_text(
+        "def create_agent():\n    return {'tool': 'search'}\n",
+        encoding="utf-8",
+    )
+
+    mock_area_findings = [
+        AreaFinding(
+            area_id=aid,
+            area_name=aname,
+            status="confirmed",
+            summary=f"{aname} 요약",
+            findings=[
+                {
+                    "content": "소스 파일에서 agent 생성 흐름을 확인했다.",
+                    "type": "fact",
+                    "evidence_refs": ["ref-1"],
+                }
+            ],
+            limitations=[],
+            unresolved_questions=[],
+        )
+        for aid, aname in COMMON_ANALYSIS_AREAS
+    ]
+    mock_structured = AreaExplorationResult(
+        area_findings=mock_area_findings,
+        evidence_refs=[
+            EvidenceRef(
+                id="ref-1",
+                source_type="code",
+                path="src/main.py",
+                description="main implementation",
+            )
+        ],
+        agent_type="ToolUse",
+    )
+
+    mock_compiled = MagicMock()
+    mock_compiled.invoke.return_value = {"structured_response": mock_structured, "messages": []}
+    monkeypatch.setattr(ae_module, "build_openai_analysis_model", lambda: MagicMock())
+    monkeypatch.setattr(ae_module, "get_settings", lambda: MagicMock(openai_api_key="fake-key"))
+
+    import langchain.agents
+    monkeypatch.setattr(langchain.agents, "create_agent", MagicMock(return_value=mock_compiled))
+
+    result = area_explorer({
+        "run_id": "test-run",
+        "local_repo_dir": str(repo),
+        "readme": "# Test Repo",
+        "file_tree": [{"path": "src/main.py"}],
+        "repo_map": {
+            "files": {
+                "src/main.py": {
+                    "definitions": ["create_agent"],
+                    "references": ["tool", "search"],
+                    "category": "source",
+                }
+            }
+        },
+        "file_catalog": [{"path": "src/main.py", "category": "source"}],
+    })
+
+    ref = result["evidence_refs"][0]
+    assert ref["content_excerpt"] == "def create_agent():\n    return {'tool': 'search'}"
+    assert ref["line_start"] == 1
+    assert ref["line_end"] == 2
+    assert ref["content_hash"].startswith("sha256:")
+    assert result["evidence_signals"][0]["content_excerpt"] == ref["content_excerpt"]
 
 
 def test_area_explorer_can_skip_agent_and_use_fallback(monkeypatch, tmp_path):

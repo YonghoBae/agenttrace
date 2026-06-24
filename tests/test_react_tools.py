@@ -38,6 +38,44 @@ def test_search_code_tool_finds_matches(tmp_path):
     assert "createAgent" in result
 
 
+def test_search_code_tool_searches_actual_source_without_symbol_match(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "agent.ts").write_text(
+        "export const runtime = { transport: 'stdio' };\n",
+        encoding="utf-8",
+    )
+
+    repo_map = {
+        "files": {
+            "src/agent.ts": {"definitions": [], "references": [], "category": "source"},
+        }
+    }
+    tools = create_react_tools(tmp_path, repo_map, [])
+    search_code = tools[1]
+    result = search_code.invoke({"query": "transport"})
+    assert "src/agent.ts:1" in result
+    assert "transport" in result
+
+
+def test_search_code_tool_includes_evidence_shape(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "agent.ts").write_text(
+        "export function createAgent() { return true; }\n",
+        encoding="utf-8",
+    )
+
+    repo_map = {"files": {"src/agent.ts": {"definitions": [], "references": [], "category": "source"}}}
+    tools = create_react_tools(tmp_path, repo_map, [])
+    search_code = tools[1]
+
+    result = search_code.invoke({"query": "createAgent"})
+
+    assert "content_hash=sha256:" in result
+    assert "line_start=1" in result
+    assert "line_end=1" in result
+    assert "content_excerpt=" in result
+
+
 def test_list_symbols_tool_returns_definitions(tmp_path):
     repo_map = {
         "files": {

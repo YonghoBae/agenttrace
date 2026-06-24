@@ -5,6 +5,7 @@ import time
 from pydantic import ValidationError
 
 from agenttrace.agents.analysis.schemas.result import AnalysisResult
+from agenttrace.agents.analysis.source_inventory import SourceInventory
 from agenttrace.agents.analysis.state import AnalysisState
 from agenttrace.logging_config import get_logger
 
@@ -39,6 +40,8 @@ def quality_gate(state: AnalysisState) -> AnalysisState:
     if result.analysis_status in {"completed_with_limitations", "insufficient_evidence", "uncertain_classification"}:
         warnings.extend(result.analysis_limitations.notes)
 
+    critical_errors.extend(_validate_confirmed_evidence(state, result))
+
     log.info("완료", errors=len(critical_errors), warnings=len(warnings), duration_ms=int((time.perf_counter() - _t) * 1000))
     return {
         "quality_gate_result": {
@@ -49,3 +52,31 @@ def quality_gate(state: AnalysisState) -> AnalysisState:
         "quality_errors": critical_errors,
         "status": "NEEDS_HUMAN_REVIEW" if critical_errors else state.get("status", "COLLECTED"),
     }
+
+
+def _validate_confirmed_evidence(state: AnalysisState, result: AnalysisResult) -> list[str]:
+    errors: list[str] = []
+    refs_by_id = {ref.id: ref.model_dump() for ref in result.evidence_refs}
+    inventory = SourceInventory.from_state(state)
+
+    confirmed_ref_ids: set[str] = set()
+    for area in result.area_findings:
+        if area.status != "confirmed":
+            continue
+        for finding in area.findings:
+            confirmed_ref_ids.update(finding.evidence_refs)
+
+    for ref_id in sorted(confirmed_ref_ids):
+        ref = refs_by_id.get(ref_id)
+        if ref is None:
+            errors.append(f"confirmed finding references unknown evidence ref: {ref_id}")
+            continue
+
+        for field in ("content_excerpt", "content_hash", "line_start", "line_end"):
+            if ref.get(field) in (None, ""):
+                errors.append(f"confirmed evidence ref missing {field}")
+
+        if inventory.records and ref.get("path") in inventory.records:
+            errors.extend(inventory.validate_evidence_ref(ref))
+
+    return errors
