@@ -239,18 +239,8 @@ def test_evidence_task_loop_resolves_supported_claim():
     assert task_result["claim_verdicts"][0]["verdict"] in {"SUPPORTED", "PARTIALLY_SUPPORTED"}
 
 
-def test_evidence_scout_prefers_repo_map_ranked_chunks_and_caps_results():
-    chunks = {
-        f"chunk-{i:02d}": {
-            "chunk_id": f"chunk-{i:02d}",
-            "file_path": "src/core.ts" if i == 24 else f"src/other_{i}.ts",
-            "content": "export function createContextTool() { return prompt; }" if i == 24 else "export const value = 1;",
-            "content_hash": f"h{i}",
-            "line_start": 1,
-            "line_end": 2,
-        }
-        for i in range(25)
-    }
+def test_evidence_scout_generates_structure_map_for_react_mode():
+    """ReAct 모드: evidence_scout가 구조 지도를 생성하고 selected_chunks는 빈 리스트."""
     state = {
         "run_id": "run-1",
         "current_task_id": "task-1",
@@ -266,19 +256,24 @@ def test_evidence_scout_prefers_repo_map_ranked_chunks_and_caps_results():
             ]
         },
         "claims": [{"claim_id": "claim-1", "claim_text": "Provides an agent tool prompt."}],
-        "chunk_index": {"chunks_by_id": chunks},
+        "chunk_index": {"chunks_by_id": {}},
         "repo_map": {
             "files": {
-                "src/core.ts": {"definitions": ["createContextTool"], "references": ["tool", "prompt"]},
+                "src/core.ts": {"definitions": ["createContextTool"], "references": ["tool", "prompt"], "category": "source"},
             },
             "area_file_ranks": {"agent-and-llm": {"src/core.ts": 1.0}},
+            "definition_ranks": {"src/core.ts::createContextTool": 0.9},
         },
     }
 
     result = evidence_scout(state)
 
-    assert result["selected_chunks"][0]["file_path"] == "src/core.ts"
-    assert len(result["selected_chunks"]) <= 15
+    # ReAct 모드: selected_chunks는 빈 리스트 (LLM이 도구로 탐색)
+    assert result["selected_chunks"] == []
+    # 구조 지도가 search_attempt에 포함됨
+    assert "structure_map" in result["search_attempt"]
+    assert "src/core.ts" in result["search_attempt"]["structure_map"]
+    assert result["search_attempt"]["mode"] == "react"
 
 
 def test_repository_synthesizer_marks_required_task_insufficient():

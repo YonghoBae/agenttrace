@@ -3,12 +3,22 @@ from __future__ import annotations
 import re
 import time
 
+from agenttrace.agents.analysis.bm25 import ChunkBM25Index
 from agenttrace.agents.analysis.state import AnalysisState
 from agenttrace.logging_config import get_logger
 
 logger = get_logger(__name__)
 
 MAX_SELECTED_CHUNKS = 15
+
+DEFAULT_WEIGHTS = {
+    "pagerank": 3.0,
+    "bm25": 2.0,
+    "embedding": 2.5,
+    "path_prior": 1.0,
+    "symbol_match": 1.5,
+    "artifact_priority": 1.0,
+}
 
 
 def _current_task(state: AnalysisState) -> dict | None:
@@ -59,9 +69,18 @@ def _chunk_score(
     target_paths: set[str],
     file_ranks: dict[str, float],
     repo_files: dict[str, dict],
+    bm25_scores: dict[str, float] | None = None,
+    embedding_scores: dict[str, float] | None = None,
+    weights: dict[str, float] | None = None,
 ) -> float:
+    """algorithm.md §22.3: FinalRetrievalScore 혼합 스코어링."""
     path = chunk.get("file_path", "")
     lower_path = path.lower()
+    chunk_id = chunk.get("chunk_id", "")
+    w = weights or DEFAULT_WEIGHTS
+    bm25 = bm25_scores or {}
+    emb = embedding_scores or {}
+
     repo_file = repo_files.get(lower_path, {})
     symbol_tokens = _tokens(
         " ".join([
@@ -78,18 +97,26 @@ def _chunk_score(
     )
 
     score = 0.0
-    score += 3.0 * file_ranks.get(lower_path, 0.0)
+    score += w["pagerank"] * file_ranks.get(lower_path, 0.0)
+    score += w["bm25"] * bm25.get(chunk_id, 0.0)
+    score += w["embedding"] * emb.get(chunk_id, 0.0)
     if query_tokens:
         score += 2.0 * len(query_tokens & chunk_tokens)
-        score += 1.5 * len(query_tokens & symbol_tokens)
+        score += w["symbol_match"] * len(query_tokens & symbol_tokens)
     if lower_path in target_paths:
-        score += 1.0
+        score += w["path_prior"]
     if repo_file.get("category") == "critical_config":
-        score += 1.0
+        score += w["artifact_priority"]
     return score
 
 
 def evidence_scout(state: AnalysisState) -> AnalysisState:
+    """구조 지도를 렌더링하고 ReAct 에이전트용 탐색 컨텍스트를 준비한다.
+
+    algorithm.md §22.5: Repository Map으로 후보를 찾은 후 원문 청크를 다시 수집한다.
+    기존: 15개 청크를 미리 선택 → LLM에게 전달 (일회성 필터)
+    개선: 구조 지도를 렌더링 → LLM이 도구로 능동 탐색 (ReAct 패턴)
+    """
     _t = time.perf_counter()
     run_id = state.get("run_id", "-")
     task_id = state.get("current_task_id", "-")
@@ -98,71 +125,88 @@ def evidence_scout(state: AnalysisState) -> AnalysisState:
     task = _current_task(state)
 
     if not task:
-        log.warning("현재 태스크 없음 — analysis_plan이 올바르게 생성됐는지 확인하세요",
+        log.warning("현재 태스크 없음",
                     duration_ms=int((time.perf_counter() - _t) * 1000))
         return {"selected_chunks": [], "search_attempt": {}}
 
-    chunk_index = state.get("chunk_index", {})
-    target_paths = {path.lower() for path in task.get("target_paths", [])}
+    repo_map = state.get("repo_map", {}) or {}
+    area_id = task.get("area_id") or ""
     query_tokens = _query_tokens(state, task)
-    chunks_by_id = chunk_index.get("chunks_by_id", {})
+    target_paths = {path.lower() for path in task.get("target_paths", [])}
     file_ranks, repo_files = _repo_map_score_inputs(state, task)
 
-    scored_chunks = []
-    for cid, chunk in chunks_by_id.items():
-        score = _chunk_score(
-            chunk,
-            query_tokens=query_tokens,
-            target_paths=target_paths,
-            file_ranks=file_ranks,
-            repo_files=repo_files,
-        )
-        if score > 0:
-            scored_chunks.append((score, cid, chunk))
+    # 구조 지도 렌더링 (algorithm.md §13)
+    definition_ranks = repo_map.get("definition_ranks", {})
+    files_data = repo_map.get("files", {})
 
-    if scored_chunks:
-        scored_chunks.sort(key=lambda item: (-item[0], item[1]))
-        selected = scored_chunks[:MAX_SELECTED_CHUNKS]
-        selected_ids = [cid for _, cid, _ in selected]
-        selected_chunks = [chunk for _, _, chunk in selected]
-    else:
-        # Filter chunks that belong to the target paths
-        selected_chunks = []
-        selected_ids = []
-        for cid, chunk in chunks_by_id.items():
-            if chunk.get("file_path", "").lower() in target_paths:
-                selected_chunks.append(chunk)
-                selected_ids.append(cid)
-    
-        # Fallback 1: if no chunks matched the target paths, select chunks that match query tokens
-        if not selected_chunks:
-            for cid, chunk in chunks_by_id.items():
-                chunk_tokens = _tokens(f"{chunk.get('file_path', '')} {chunk.get('content_hash', '')}")
-                if query_tokens & chunk_tokens:
-                    selected_chunks.append(chunk)
-                    selected_ids.append(cid)
+    # 상위 정의를 파일별로 그룹화
+    file_symbols: dict[str, list[tuple[str, float]]] = {}
+    for key, score in list(definition_ranks.items())[:300]:
+        if "::" in key:
+            path, symbol = key.rsplit("::", 1)
+            if path not in file_symbols:
+                file_symbols[path] = []
+            file_symbols[path].append((symbol, score))
 
-        # Fallback 2: if still empty, select first chunks to prevent empty analysis
-        if not selected_chunks:
-            first_keys = list(chunks_by_id.keys())[:MAX_SELECTED_CHUNKS]
-            selected_chunks = [chunks_by_id[k] for k in first_keys]
-            selected_ids = first_keys
+    # critical_config 파일 추가
+    for path, data in files_data.items():
+        if data.get("category") == "critical_config" and path not in file_symbols:
+            file_symbols[path] = []
+
+    # target_paths 파일이 구조 지도에 없으면 추가
+    for tp in target_paths:
+        if tp not in file_symbols and tp in files_data:
+            file_symbols[tp] = []
+
+    # 구조 지도 텍스트 생성
+    structure_lines = [
+        f"=== Structure Map for area: {area_id} ===",
+        f"Total files in repo: {len(files_data)}",
+        f"Files in this map: {len(file_symbols)}",
+        f"Claims to verify: {', '.join(task.get('claims', []))}",
+        "",
+    ]
+    def _sort_key(p: str) -> tuple[float, str]:
+        syms = file_symbols.get(p, [])
+        return (-sum(s for _, s in syms) if syms else 0, p)
+
+    for path in sorted(file_symbols.keys(), key=_sort_key):
+        symbols = file_symbols[path]
+        category = files_data.get(path, {}).get("category", "")
+        rank = file_ranks.get(path.lower(), 0.0)
+        if symbols:
+            top_symbols = [s for s, _ in sorted(symbols, key=lambda x: -x[1])[:10]]
+            structure_lines.append(f"{path} [{category}] (rank={rank:.4f})")
+            for s in top_symbols:
+                structure_lines.append(f"  - {s}")
         else:
-            selected_chunks = selected_chunks[:MAX_SELECTED_CHUNKS]
-            selected_ids = selected_ids[:MAX_SELECTED_CHUNKS]
+            structure_lines.append(f"{path} [{category}] (rank={rank:.4f}) (config/artifact)")
+        structure_lines.append("")
+
+    structure_map_text = "\n".join(structure_lines)
+
+    # claim 텍스트도 포함
+    claim_texts = _claim_texts(state, task)
+    claims_summary = "\n".join(f"- {ct}" for ct in claim_texts)
 
     attempt = {
         "attempt": 1,
+        "mode": "react",
+        "area_id": area_id,
         "queries": sorted(query_tokens)[:20],
-        "candidate_chunk_ids": list(chunks_by_id.keys()),
-        "selected_chunk_ids": selected_ids,
-        "excluded_chunk_ids": [cid for cid in chunks_by_id if cid not in selected_ids],
+        "target_paths": list(target_paths)[:20],
+        "structure_map": structure_map_text,
+        "claims_summary": claims_summary,
+        "candidate_files": list(file_symbols.keys()),
+        "selected_chunk_ids": [],
+        "excluded_chunk_ids": [],
         "exclusion_reasons": {},
     }
 
-    log.info("완료", selected_chunks=len(selected_chunks), duration_ms=int((time.perf_counter() - _t) * 1000))
+    log.info("완료", mode="react", files_in_map=len(file_symbols),
+             duration_ms=int((time.perf_counter() - _t) * 1000))
     return {
-        "selected_chunks": selected_chunks,
+        "selected_chunks": [],
         "search_attempt": attempt,
     }
 

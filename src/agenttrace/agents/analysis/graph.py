@@ -16,6 +16,7 @@ from agenttrace.agents.analysis.nodes.content_preprocessor import content_prepro
 from agenttrace.agents.analysis.nodes.critical_error_handler import critical_error_handler
 from agenttrace.agents.analysis.nodes.evidence_evaluator import evidence_evaluator
 from agenttrace.agents.analysis.nodes.evidence_scout import evidence_scout
+from agenttrace.agents.analysis.nodes.extract_mentions import extract_mentions
 from agenttrace.agents.analysis.nodes.finalize_analysis import finalize_analysis
 from agenttrace.agents.analysis.nodes.finalize_task import finalize_task
 from agenttrace.agents.analysis.nodes.harness_analyzer import harness_analyzer
@@ -51,6 +52,7 @@ def build_graph(*, content_index_store=None, embedding_service=None, embedding_s
     builder = StateGraph(AnalysisState)
 
     builder.add_node("collect_inputs", collect_inputs)
+    builder.add_node("extract_mentions", extract_mentions)
     builder.add_node("build_file_catalog", build_file_catalog)
     builder.add_node("build_repo_map", build_repo_map_node)
     builder.add_node("content_preprocessor", content_preprocessor)
@@ -84,7 +86,8 @@ def build_graph(*, content_index_store=None, embedding_service=None, embedding_s
     builder.add_node("persist_analysis", persist_analysis)
 
     builder.add_edge(START, "collect_inputs")
-    builder.add_edge("collect_inputs", "build_file_catalog")
+    builder.add_edge("collect_inputs", "extract_mentions")
+    builder.add_edge("extract_mentions", "build_file_catalog")
     builder.add_edge("build_file_catalog", "build_repo_map")
     builder.add_edge("build_repo_map", "content_preprocessor")
     builder.add_edge("content_preprocessor", "content_indexer")

@@ -104,6 +104,7 @@ def collect_inputs(state: AnalysisState) -> AnalysisState:
         "file_tree": [{"path": path} for path in request.file_tree],
         "source_files": state_source_files,
         "selected_files": state_source_files,
+        "deferred_file_paths": assembled.deferred_file_paths,
         "missing_inputs": assembled.missing_inputs,
         "input_manifest": assembled.input_manifest,
         "analysis_mode": assembled.analysis_mode,

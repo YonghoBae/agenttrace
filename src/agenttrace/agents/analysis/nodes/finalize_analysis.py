@@ -231,6 +231,30 @@ def finalize_analysis(state: AnalysisState) -> AnalysisState:
 
 def _build_evidence_refs(state: AnalysisState) -> list[dict]:
     refs: list[dict] = []
+
+    # ReAct 모드: evidence_signals에서 evidence_refs 생성
+    signals = state.get("evidence_signals", [])
+    if signals:
+        for idx, sig in enumerate(signals, start=1):
+            path = sig.get("path") or "unknown"
+            refs.append(
+                {
+                    "id": f"ref-{idx}",
+                    "source_type": _source_type(path),
+                    "path": path,
+                    "symbol": None,
+                    "description": f"{path}에서 확인한 ReAct 탐색 근거",
+                    "chunk_id": sig.get("chunk_id") or "",
+                    "line_start": sig.get("line_start"),
+                    "line_end": sig.get("line_end"),
+                    "content_excerpt": sig.get("content_excerpt") or "",
+                    "content_hash": sig.get("content_hash") or "",
+                }
+            )
+        if refs:
+            return refs
+
+    # Fallback: content_chunks에서 생성 (기존 로직)
     for idx, chunk in enumerate(state.get("content_chunks", [])[:5], start=1):
         path = chunk.get("file_path") or chunk.get("path") or "unknown"
         content = chunk.get("content") or ""
@@ -302,16 +326,31 @@ def _build_area_findings(state: AnalysisState, evidence_refs: list[dict]) -> lis
         file_tree_str = json.dumps(file_tree, indent=2, ensure_ascii=False)
 
         formatted_chunks = []
-        for chunk in content_chunks:
-            path = chunk.get("file_path") or chunk.get("path") or "unknown"
-            content = chunk.get("content") or ""
-            line_start = chunk.get("line_start") or chunk.get("start_line") or 1
-            line_end = chunk.get("line_end") or chunk.get("end_line") or 1
-            chunk_id = chunk.get("chunk_id") or "unknown"
-            formatted_chunks.append(
-                f"--- File: {path} (Lines {line_start}-{line_end}) [Chunk ID: {chunk_id}] ---\n"
-                f"{content}\n"
-            )
+        # ReAct 모드: evidence_signals를 코드 근거로 사용
+        signals = state.get("evidence_signals", [])
+        if signals:
+            for sig in signals:
+                path = sig.get("path") or "unknown"
+                sig_type = sig.get("signal_type", "")
+                excerpt = sig.get("content_excerpt") or ""
+                line_start = sig.get("line_start") or 1
+                line_end = sig.get("line_end") or 1
+                formatted_chunks.append(
+                    f"--- File: {path} (Lines {line_start}-{line_end}) [Type: {sig_type}] ---\n"
+                    f"{excerpt}\n"
+                )
+        # Fallback: content_chunks가 있으면 사용
+        if not formatted_chunks:
+            for chunk in content_chunks:
+                path = chunk.get("file_path") or chunk.get("path") or "unknown"
+                content = chunk.get("content") or ""
+                line_start = chunk.get("line_start") or chunk.get("start_line") or 1
+                line_end = chunk.get("line_end") or chunk.get("end_line") or 1
+                chunk_id = chunk.get("chunk_id") or "unknown"
+                formatted_chunks.append(
+                    f"--- File: {path} (Lines {line_start}-{line_end}) [Chunk ID: {chunk_id}] ---\n"
+                    f"{content}\n"
+                )
         chunks_text = "\n".join(formatted_chunks)
         if len(chunks_text) > 100000:
             chunks_text = chunks_text[:100000] + "\n... [TRUNCATED] ..."

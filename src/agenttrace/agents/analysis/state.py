@@ -53,7 +53,14 @@ class AnalysisState(TypedDict, total=False):
     file_tree: list[dict]
     file_catalog: list[dict]        # build_file_catalog 노드 출력
     critical_config_paths: list[str]  # 항상 포함 보장 경로 목록
+    mentioned_fnames: list[str]     # algorithm.md §4.3 사용자 언급 파일
+    mentioned_idents: list[str]     # algorithm.md §4.4 사용자 언급 식별자
+    chat_file_paths: list[str]      # algorithm.md §4.1 현재 작업 파일
     repo_map: dict
+    definition_ranks: dict          # algorithm.md §10 (file::symbol) → score
+    symbol_tags: list[dict]         # algorithm.md §23 SymbolTag 목록
+    repo_map_render: str            # algorithm.md §13 토큰 예산 맞춘 렌더링
+    deferred_file_paths: list[str]  # 지연 fetch 대상 파일 경로 목록
     selected_files: list[dict]
     output_path: str
     analysis_request: dict

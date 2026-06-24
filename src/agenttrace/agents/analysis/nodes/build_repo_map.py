@@ -20,6 +20,9 @@ def build_repo_map_node(state: AnalysisState) -> AnalysisState:
     repo_map = build_repo_map(
         source_files,
         file_tree=state.get("file_tree", []),
+        mentioned_idents=state.get("mentioned_idents", []),
+        mentioned_fnames=state.get("mentioned_fnames", []),
+        chat_file_paths=state.get("chat_file_paths", []),
     )
 
     log.info(
